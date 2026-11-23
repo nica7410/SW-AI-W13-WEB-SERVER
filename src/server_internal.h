@@ -9,7 +9,7 @@ struct local_root {
     char base[PATH_MAX];
 };
 
-void init_local_root(struct local_root *root, const char *directory);
+int init_local_root(struct local_root *root, const char *directory);
 void close_local_root(struct local_root *root);
 int open_local_file(const struct local_root *root, const char *url, int directory_index,
                     int flags, int *file, char resolved[PATH_MAX]);

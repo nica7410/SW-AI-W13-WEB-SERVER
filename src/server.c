@@ -173,27 +173,34 @@ int run_server(const server_config *cfg) {
     g_cfg = cfg;
     g_routes.count = 0;
     if (cfg->routes_path && load_routes(cfg->routes_path, &g_routes) < 0) return -1;
+    int error = init_local_root(&static_root, cfg->root);
+    if (error) {
+        fprintf(stderr, "%sstatic root %s: %s\n", cfg->root_explicit ? "" : "warning: ",
+                cfg->root, strerror(error));
+        if (cfg->root_explicit) return -1;
+    }
+    error = init_local_root(&cgi_root, cfg->cgi_dir);
+    if (error) fprintf(stderr, "warning: CGI directory %s: %s\n", cfg->cgi_dir, strerror(error));
+    int status = -1;
     int listenfd = open_listenfd(cfg->port);
     if (listenfd < 0) {
         fprintf(stderr, "cannot listen on port %s\n", cfg->port);
-        return -1;
+        goto close_roots;
     }
     int flags = fcntl(listenfd, F_GETFL);
     if (flags < 0 || fcntl(listenfd, F_SETFL, flags | O_NONBLOCK) < 0) {
         close(listenfd);
-        return -1;
+        goto close_roots;
     }
     int queue_size = fit_queue_to_fd_limit(cfg->threads, cfg->queue_size);
     threadpool *pool = threadpool_create(cfg->threads, queue_size, handle_connection);
     if (!pool) {
         fprintf(stderr, "cannot create worker pool\n");
         close(listenfd);
-        return -1;
+        goto close_roots;
     }
     g_pool = pool;
-    init_local_root(&static_root, cfg->root);
-    init_local_root(&cgi_root, cfg->cgi_dir);
-    int status = 0;
+    status = 0;
     // fds[0]은 듣기 소켓, fds[1..]은 503을 보내고 클라이언트가 닫기를 기다리는 연결
     struct pollfd fds[1 + MAX_REJECTED] = {{.fd = listenfd, .events = POLLIN}};
     deadline_ms linger_end[1 + MAX_REJECTED];
@@ -248,6 +255,7 @@ int run_server(const server_config *cfg) {
     close(listenfd);
     threadpool_destroy(pool);
     g_pool = NULL;
+close_roots:
     close_local_root(&static_root);
     close_local_root(&cgi_root);
     return status;

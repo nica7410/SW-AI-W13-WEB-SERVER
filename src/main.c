@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     while ((opt = getopt(argc, argv, "p:r:g:c:ft:q:")) != -1) {
         switch (opt) {
         case 'p': cfg.port = optarg; break;
-        case 'r': cfg.root = optarg; break;
+        case 'r': cfg.root = optarg; cfg.root_explicit = 1; break;
         case 'g': cfg.cgi_dir = optarg; break;
         case 'c': cfg.routes_path = optarg; break;
         case 'f': cfg.forward_enabled = 1; break;

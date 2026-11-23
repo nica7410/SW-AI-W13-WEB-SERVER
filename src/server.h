@@ -12,6 +12,7 @@ typedef struct {
     int forward_enabled;       // -f  Forward Proxy 허용 (기본 0 — 아무나 쓰는 열린 프록시가 되지 않도록 명시적으로 켬)
     int threads;               // -t  워커 스레드 수 (기본 8)
     int queue_size;            // -q  연결 대기 큐 크기 (기본 1024). 큐는 fd만 담으므로 크게 잡아도 부담이 작다
+    int root_explicit;         // -r가 주어지면 루트 열기 실패 시 기동 중단
 } server_config;
 
 // 서버 실행: 설정 로드 → open_listenfd → 스레드 풀 생성 → 종료 요청이 올 때까지 accept → submit

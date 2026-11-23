@@ -75,12 +75,15 @@ int resolve_local_path(const char *root, const char *path, int directory_index,
     return canonical_target(base, path, directory_index, resolved);
 }
 
-void init_local_root(struct local_root *root, const char *directory) {
+int init_local_root(struct local_root *root, const char *directory) {
     root->fd = -1;
     root->status = 0;
     if (realpath(directory, root->base))
         root->fd = open(root->base, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (root->fd < 0) root->status = file_error_status(errno);
+    if (root->fd >= 0) return 0;
+    int error = errno;
+    root->status = file_error_status(error);
+    return error;
 }
 
 void close_local_root(struct local_root *root) {
