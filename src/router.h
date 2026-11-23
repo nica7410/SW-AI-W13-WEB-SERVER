@@ -5,6 +5,7 @@
 //   /api/ 127.0.0.1:8001 127.0.0.1:8002
 #ifndef ROUTER_H
 #define ROUTER_H
+#include <stdint.h>
 
 #define MAX_ROUTES   16
 #define MAX_BACKENDS 8
@@ -15,10 +16,22 @@ typedef struct {
 } backend;
 
 typedef struct {
+    int64_t retry_at;
+    uint64_t issued, applied;
+    int probing;
+} backend_health;
+
+typedef struct {
+    int index, eligible;
+    uint64_t ticket;
+} backend_attempt;
+
+typedef struct {
     char prefix[256];                    // 이 문자열로 시작하는 경로가 대상
     backend backends[MAX_BACKENDS];
+    backend_health health[MAX_BACKENDS];
     int backend_count;
-    unsigned int next;                   // Round-Robin 카운터. 여러 워커 스레드가 동시에 증가시키므로 atomic 사용
+    unsigned int next;                   // 워커들이 잠금 아래 갱신하는 다음 시작 위치
 } route;
 
 typedef struct {
@@ -37,5 +50,8 @@ route *match_route(route_table *table, const char *path);
 
 // Round-Robin으로 다음 백엔드 선택 (스레드 안전)
 const backend *next_backend(route *r);
+int select_backend(route *r, unsigned tried, int64_t now, backend_attempt *attempt);
+void finish_backend(route *r, const backend_attempt *attempt, int connected,
+                    int peer_failed, int64_t now);
 
 #endif

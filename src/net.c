@@ -39,7 +39,7 @@ struct query {
     char host[NI_MAXHOST], port[NI_MAXSERV];
     struct addrinfo *addresses;
     lookup_fn *lookup;
-    int done, abandoned;
+    int done, abandoned, error;
 };
 
 static pthread_mutex_t query_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -77,7 +77,9 @@ static void *resolve_job(void *arg) {
     pthread_detach(pthread_self());
     struct addrinfo hints = {.ai_socktype = SOCK_STREAM, .ai_flags = AI_NUMERICSERV};
     struct addrinfo *list = NULL;
-    if (q->lookup(q->host, q->port, &hints, &list) != 0) list = NULL;
+    int rc = q->lookup(q->host, q->port, &hints, &list);
+    int error = rc == EAI_MEMORY ? ENOMEM : rc == EAI_SYSTEM ? errno : EHOSTUNREACH;
+    if (rc) list = NULL;
     pthread_mutex_lock(&query_lock);
     active_queries--;
     if (q->abandoned) {
@@ -86,6 +88,7 @@ static void *resolve_job(void *arg) {
     } else {
         q->done = 1;
         q->addresses = list;
+        q->error = rc ? error : 0;
     }
     pthread_cond_broadcast(&query_changed);
     pthread_mutex_unlock(&query_lock);
@@ -93,7 +96,7 @@ static void *resolve_job(void *arg) {
 }
 
 static int resolve_until(const char *host, const char *port, deadline_ms end,
-                         lookup_fn *lookup, struct addrinfo **list) {
+                         lookup_fn *lookup, struct addrinfo **list, int *contacted) {
     struct in6_addr numeric;
     if (inet_pton(AF_INET, host, &numeric) || inet_pton(AF_INET6, host, &numeric)) {
         struct addrinfo hints = {.ai_socktype = SOCK_STREAM,
@@ -120,6 +123,7 @@ static int resolve_until(const char *host, const char *port, deadline_ms end,
     if (!error) error = pthread_create(&thread, NULL, resolve_job, q);
     if (!error) {
         active_queries++;
+        *contacted = 1;
         while (!error && !q->done) error = wait_for_query(end);
         if (!q->done) {
             q->abandoned = 1;
@@ -127,7 +131,7 @@ static int resolve_until(const char *host, const char *port, deadline_ms end,
             return error;
         }
         *list = q->addresses;
-        if (!*list) error = EHOSTUNREACH;
+        if (!*list) error = q->error ? q->error : EHOSTUNREACH;
     }
     pthread_mutex_unlock(&query_lock);
     free(q);
@@ -148,16 +152,22 @@ static int connect_address(int fd, const struct addrinfo *a, deadline_ms end) {
     return fcntl(fd, F_SETFL, flags);
 }
 
-int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn *lookup) {
+int connect_for_route(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
+                      int *peer_failed) {
+    *peer_failed = 0;
     if (!deadline_left(end)) return -1;
     struct addrinfo *list = NULL;
-    int error = resolve_until(host, port, end, lookup, &list);
+    int contacted = 0;
+    int error = resolve_until(host, port, end, lookup, &list, &contacted);
     int fd = -1;
     if (!error) {
-        error = ECONNREFUSED;
+        // 조회 성공 뒤 연결을 시도하기 전에 예산이 끝나면 목적지 실패로 세지 않는다.
+        contacted = 0;
+        error = ETIMEDOUT;
         for (struct addrinfo *a = list; a && deadline_left(end); a = a->ai_next) {
             fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
             if (fd < 0) { error = errno; continue; }
+            contacted = 1;
             if (connect_address(fd, a, end) == 0) break;
             error = errno;
             close(fd);
@@ -165,6 +175,9 @@ int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn
         }
     }
     if (list) freeaddrinfo(list);
+    *peer_failed = fd < 0 && contacted &&
+        (error == ECONNREFUSED || error == ETIMEDOUT || error == EHOSTUNREACH ||
+         error == ENETUNREACH || error == ECONNRESET);
     if (!deadline_left(end)) {
         if (fd >= 0) close(fd);
         errno = ETIMEDOUT;
@@ -172,6 +185,11 @@ int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn
     }
     if (fd < 0) errno = error;
     return fd;
+}
+
+int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn *lookup) {
+    int peer_failed;
+    return connect_for_route(host, port, end, lookup, &peer_failed);
 }
 
 int open_clientfd(const char *host, const char *port) {

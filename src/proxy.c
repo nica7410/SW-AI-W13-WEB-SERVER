@@ -76,19 +76,28 @@ int proxy_relay(int clientfd, int upstreamfd, const http_request *req, const cha
 
 int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadline_ms end,
                         connect_fn *connect_backend) {
-    const backend *first = next_backend(r);
-    if (!first) return 502;
-    int start = (int)(first - r->backends), error = 502;
-    for (int i = 0; i < r->backend_count; i++) {
-        const backend *b = &r->backends[(start + i) % r->backend_count];
+    unsigned tried = 0;
+    int error = 502;
+    backend_attempt attempt = {0};
+    while (deadline_left(end) && select_backend(r, tried, deadline_after(0), &attempt)) {
+        const backend *b = &r->backends[attempt.index];
+        tried |= 1u << attempt.index;
         end = effective_deadline(end);
         int left = deadline_left(end);
-        if (!left) return 504;
-        int share = left / (r->backend_count - i);
+        if (!left) {
+            finish_backend(r, &attempt, 0, 0, deadline_after(0));
+            return 504;
+        }
+        int share = left / attempt.eligible;
         deadline_ms attempt_end = end - left + (share ? share : 1);
-        int upstream = connect_backend(b->host, b->port, attempt_end, getaddrinfo);
+        int peer_failed = 0;
+        int upstream = connect_backend(b->host, b->port, attempt_end, getaddrinfo, &peer_failed);
+        int connect_error = errno;
+        int backend_failure = peer_failed && deadline_left(end) &&
+                              effective_deadline(INT64_MAX) == INT64_MAX;
+        finish_backend(r, &attempt, upstream >= 0, backend_failure, deadline_after(0));
         if (upstream < 0) {
-            if (errno == ETIMEDOUT) error = 504;
+            if (connect_error == ETIMEDOUT) error = 504;
             if (!deadline_left(end)) return 504;
             continue;
         }
@@ -97,10 +106,10 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         close(upstream);
         return status;
     }
-    return error;
+    return deadline_left(end) ? error : 504;
 }
 
 int reverse_proxy_request(int clientfd, const http_request *req, route *r) {
     return reverse_proxy_until(clientfd, req, r, deadline_after(PROXY_TIMEOUT_SEC * 1000),
-                               connect_until);
+                               connect_for_route);
 }

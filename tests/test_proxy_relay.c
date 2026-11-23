@@ -134,13 +134,15 @@ static void test_total_response_deadline(void) {
 static int connect_calls, healthy_fd;
 static deadline_ms request_end;
 
-static int connect_candidate(const char *host, const char *port, deadline_ms end, lookup_fn *lookup) {
+static int connect_candidate(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
+                             int *peer_failed) {
     (void)port;
     (void)lookup;
     if (++connect_calls == 1) {
         CHECK_STR(host, "first");
         CHECK(end < request_end && deadline_left(end) > 0);
         errno = ETIMEDOUT;
+        *peer_failed = 1;
         return -1;
     }
     CHECK_STR(host, "second");
@@ -176,6 +178,31 @@ static void test_connection_failover(void) {
     CHECK(date && !strstr(date + 1, "\r\nDate: "));
     close(origin[1]);
     close_pair(client);
+}
+
+static void test_cooldown_recovery(void) {
+    route r;
+    CHECK(parse_route_line("/api/ first:80 second:80", &r) == 1);
+    backend_attempt a = {0}, b = {0};
+    CHECK(select_backend(&r, 0, 10, &a) == 2 && a.index == 0);
+    finish_backend(&r, &a, 0, 1, 10);
+    CHECK(select_backend(&r, 1, 11, &a) == 1 && a.index == 1);
+    finish_backend(&r, &a, 1, 0, 11);
+    CHECK(select_backend(&r, 0, 12, &a) == 1 && a.index == 1);
+    finish_backend(&r, &a, 0, 1, 12);
+    CHECK(!select_backend(&r, 0, 13, &a));
+    CHECK(select_backend(&r, 0, 5010, &a) == 1 && a.index == 0);
+    CHECK(!select_backend(&r, 0, 5010, &b));
+    finish_backend(&r, &a, 1, 0, 5010);
+    CHECK(select_backend(&r, 0, 5011, &b) == 1 && b.index == 0);
+    finish_backend(&r, &b, 1, 0, 5011);
+
+    // 같은 후보를 고른 두 워커 중 나중 워커가 로컬 오류로 먼저 끝나는 경우.
+    CHECK(select_backend(&r, 0, 5011, &a) == 1 && a.index == 0);
+    CHECK(select_backend(&r, 0, 5011, &b) == 1 && b.index == 0);
+    finish_backend(&r, &b, 0, 0, 5011);
+    finish_backend(&r, &a, 0, 1, 5011);
+    CHECK(!select_backend(&r, 0, 5011, &b));
 }
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -247,6 +274,7 @@ int main(void) {
     test_truncated_chunk();
     test_total_response_deadline();
     test_connection_failover();
+    test_cooldown_recovery();
     test_deadline();
     return TEST_RESULT();
 }
