@@ -47,6 +47,13 @@ int load_routes(const char *path, route_table *table) {
             result = -1;
             break;
         }
+        for (int i = 0; i < table->count; i++) {
+            if (!strcmp(table->routes[i].prefix, entry.prefix)) {
+                fprintf(stderr, "%s:%zu: duplicate route prefix %s (first rule takes precedence)\n",
+                        path, number, entry.prefix);
+                break;
+            }
+        }
         table->routes[table->count++] = entry;
     }
     if (ferror(file)) result = -1;

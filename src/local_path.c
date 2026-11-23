@@ -30,10 +30,9 @@ static int hex_value(char c) {
     return -1;
 }
 
-static int canonical_target(const char *base, const char *path, int directory_index,
-                       char resolved[PATH_MAX]) {
-    char decoded[MAX_URI_LEN];
+int decode_url_path(const char *path, char *decoded, size_t capacity) {
     size_t n = 0;
+    if (!capacity) return 414;
     while (*path) {
         unsigned char c = (unsigned char)*path++;
         if (c == '%') {
@@ -45,10 +44,18 @@ static int canonical_target(const char *base, const char *path, int directory_in
             c = (unsigned char)(hi * 16 + lo);
         }
         if (c < 32 || c == 127 || c == '\\') return 400;
-        if (n == sizeof(decoded) - 1) return 414;
+        if (n == capacity - 1) return 414;
         decoded[n++] = (char)c;
     }
     decoded[n] = '\0';
+    return 0;
+}
+
+static int canonical_target(const char *base, const char *path, int directory_index,
+                            char resolved[PATH_MAX]) {
+    char decoded[MAX_URI_LEN];
+    int status = decode_url_path(path, decoded, sizeof(decoded));
+    if (status) return status;
     for (const char *p = decoded; *p;) {
         p += strspn(p, "/");
         size_t len = strcspn(p, "/");
@@ -57,6 +64,7 @@ static int canonical_target(const char *base, const char *path, int directory_in
     }
 
     char candidate[PATH_MAX];
+    size_t n = strlen(decoded);
     int index = directory_index && n && decoded[n - 1] == '/';
     int len = snprintf(candidate, sizeof(candidate), "%s/%s%s", base, decoded,
                        index ? "index.html" : "");

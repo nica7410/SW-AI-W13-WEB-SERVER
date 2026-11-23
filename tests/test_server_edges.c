@@ -101,13 +101,22 @@ static void test_root_and_file_identity(void) {
     CHECK_STR(content, "original");
     close(file);
 
-    const char *script = "#!/bin/sh\nprintf 'Status: 400\\r\\nContent-Type: text/plain\\r\\n\\r\\nfirst'\n";
+    const char *script = "#!/bin/sh\n"
+        "printf 'Status: 400\\r\\nContent-Type: text/plain\\r\\n\\r\\nfirst|%s|%s|%s|%s|%s' "
+        "\"$SERVER_PROTOCOL\" \"$SCRIPT_NAME\" \"$SERVER_NAME\" \"$SERVER_PORT\" \"$REMOTE_ADDR\"\n";
     write_file("root/run", script, 0700);
     require(symlink("run", "root/run-link") == 0, "script link");
-    strcpy(req.path, "/cgi-bin/run-link");
-    require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
+    CHECK(parse_request_line("GET /cgi-bin/run%2Dlink?q=1 HTTP/1.1\r\n", &req) == 0);
+    CHECK(parse_header_line("Host: cgi.example:80\r\n", &req) == 0);
+    tcp_pair(pair);
+    struct sockaddr_in server;
+    socklen_t addrlen = sizeof(server);
+    require(getpeername(pair[1], (struct sockaddr *)&server, &addrlen) == 0, "CGI server port");
+    char expected[128];
+    snprintf(expected, sizeof(expected), "first|HTTP/1.1|/cgi-bin/run-link|cgi.example|%u|127.0.0.1",
+             (unsigned)ntohs(server.sin_port));
     CHECK(serve_cgi_at(pair[0], &root, &req) == 0);
-    check_reply(pair, "HTTP/1.1 400 \r\n", "first");
+    check_reply(pair, "HTTP/1.1 400 \r\n", expected);
     int program;
     require(open_local_file(&root, "run-link", 0, O_RDONLY, &program, path) == 0, "pin CGI");
     write_file("root/replacement", "not an executable\n", 0600);
@@ -115,7 +124,7 @@ static void test_root_and_file_identity(void) {
     require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
 #ifdef __linux__
     CHECK(serve_open_cgi(pair[0], program, path, &req) == 0);
-    check_reply(pair, "HTTP/1.1 400 \r\n", "first");
+    check_reply(pair, "HTTP/1.1 400 \r\n", "first|HTTP/1.1|/cgi-bin/run-link|cgi.example||");
 #else
     CHECK(serve_open_cgi(pair[0], program, path, &req) == 403);
     close(pair[0]);

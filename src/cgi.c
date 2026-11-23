@@ -5,9 +5,11 @@
 #include "server_internal.h"
 #include <fcntl.h>
 #include "local_path.h"
+#include "proxy_internal.h"
 #include "response_stream.h"
 #include "server.h"
 #include <errno.h>
+#include <netdb.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -59,6 +61,17 @@ static void reap_child(pid_t child, int owns_group, int abort_child, deadline_ms
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
 }
 
+static int numeric_address(int fd, int peer, char *host, socklen_t hostlen,
+                           char *port, socklen_t portlen) {
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    int rc = peer ? getpeername(fd, (struct sockaddr *)&addr, &len)
+                  : getsockname(fd, (struct sockaddr *)&addr, &len);
+    if (rc || (addr.ss_family != AF_INET && addr.ss_family != AF_INET6)) return 0;
+    return getnameinfo((struct sockaddr *)&addr, len, host, hostlen, port, portlen,
+                       NI_NUMERICHOST | NI_NUMERICSERV) == 0;
+}
+
 static int run_cgi(int fd, int program, char *path, const http_request *req) {
     char method[32], query[MAX_URI_LEN + 16], length[64], type[MAX_HEADER_VALUE + 16];
     const char *content_type = get_header(req, "Content-Type");
@@ -66,8 +79,30 @@ static int run_cgi(int fd, int program, char *path, const http_request *req) {
     snprintf(query, sizeof(query), "QUERY_STRING=%s", req->query);
     snprintf(length, sizeof(length), "CONTENT_LENGTH=%zu", req->content_length);
     snprintf(type, sizeof(type), "CONTENT_TYPE=%s", content_type ? content_type : "");
-    char *env[] = {method, query, length, type, "GATEWAY_INTERFACE=CGI/1.1",
-                   "PATH=/usr/bin:/bin", NULL};
+    char protocol[sizeof("SERVER_PROTOCOL=") + sizeof(req->version)];
+    char script[sizeof("SCRIPT_NAME=") - 1 + MAX_URI_LEN] = "SCRIPT_NAME=";
+    snprintf(protocol, sizeof(protocol), "SERVER_PROTOCOL=%s", req->version);
+    int decoded = decode_url_path(req->path, script + strlen(script), MAX_URI_LEN);
+    if (decoded) return decoded;
+
+    char name[sizeof("SERVER_NAME=") - 1 + MAX_HEADER_VALUE] = "SERVER_NAME=";
+    char port[sizeof("SERVER_PORT=") - 1 + NI_MAXSERV] = "SERVER_PORT=";
+    char remote[sizeof("REMOTE_ADDR=") - 1 + NI_MAXHOST] = "REMOTE_ADDR=";
+    char *host = name + strlen(name);
+    int local = numeric_address(fd, 0, host, MAX_HEADER_VALUE, port + strlen(port), NI_MAXSERV);
+    const char *authority = get_header(req, "Host");
+    if (authority) {
+        char ignored_port[8];
+        if (parse_authority(authority, strlen(authority), "80", host, MAX_HEADER_VALUE,
+                            ignored_port, sizeof(ignored_port)) < 0) return 400;
+    }
+    char *env[] = {method, query, length, type, "GATEWAY_INTERFACE=CGI/1.1", "PATH=/usr/bin:/bin",
+                   protocol, script, NULL, NULL, NULL, NULL};
+    char **next = env;
+    while (*next) next++;
+    if (authority || local) *next++ = name;
+    if (local) *next++ = port;
+    if (numeric_address(fd, 1, remote + strlen(remote), NI_MAXHOST, NULL, 0)) *next++ = remote;
     char *argv[] = {path, NULL};
     FILE *input = body_input(req);
     if (!input) return 500;
