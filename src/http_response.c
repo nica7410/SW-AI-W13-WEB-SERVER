@@ -4,6 +4,7 @@
 #include "rio.h"
 #include "server_internal.h"
 #include <stdio.h>
+#include <string.h>
 
 int format_http_date(time_t when, char value[HTTP_DATE_SIZE]) {
     static const char *const days[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
@@ -19,6 +20,7 @@ int format_http_date(time_t when, char value[HTTP_DATE_SIZE]) {
 const char *status_text(int status) {
     switch (status) {
     case 200: return "OK";
+    case 301: return "Moved Permanently";
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
@@ -39,9 +41,9 @@ const char *status_text(int status) {
     }
 }
 
-int send_headers(int fd, int status, const char *content_type, size_t content_length,
-                 int keep_alive) {
-    char headers[512];
+static int write_headers(int fd, int status, const char *content_type, size_t content_length,
+                         int keep_alive, const char *extra) {
+    char headers[MAX_URI_LEN + 512];
     char date[HTTP_DATE_SIZE];
     time_t now = time(NULL);
     int dated = now != (time_t)-1 && format_http_date(now, date);
@@ -50,11 +52,26 @@ int send_headers(int fd, int status, const char *content_type, size_t content_le
                      "Connection: %s\r\n%s%s%s%s\r\n", status, status_text(status), content_type,
                      content_length, keep_alive ? "keep-alive" : "close",
                      dated ? "Date: " : "", dated ? date : "", dated ? "\r\n" : "",
-                     status == 405 ? "Allow: GET, HEAD\r\n" : "");
+                     extra);
     if (n < 0 || (size_t)n >= sizeof(headers)) return -1;
     if (send_until(fd, headers, (size_t)n, INT64_MAX) < 0) return -1;
     access_headers_sent(status);
     return 0;
+}
+
+int send_headers(int fd, int status, const char *type, size_t length, int keep_alive) {
+    return write_headers(fd, status, type, length, keep_alive,
+                         status == 405 ? "Allow: GET, HEAD\r\n" : "");
+}
+
+int send_directory_redirect(int fd, const http_request *req) {
+    // Use the original URL spelling, including an empty query, with one leading slash.
+    const char *path = req->path + strspn(req->path, "/");
+    const char *query = strchr(req->uri, '?');
+    char field[MAX_URI_LEN + sizeof("Location: //\r\n")];
+    int n = snprintf(field, sizeof(field), "Location: /%s/%s\r\n", path, query ? query : "");
+    if (n < 0 || (size_t)n >= sizeof(field)) return 414;
+    return write_headers(fd, 301, "text/html", 0, req->keep_alive, field);
 }
 
 int send_response(int fd, int status, const char *type, const void *body, size_t len,

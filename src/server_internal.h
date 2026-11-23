@@ -17,4 +17,5 @@ int serve_static_at(int fd, const struct local_root *root, const http_request *r
 int serve_cgi_at(int fd, const struct local_root *root, const http_request *req);
 int serve_open_cgi(int client, int program, char *path, const http_request *req);
 int send_request_error(int fd, int status, int keep_alive, int head_only);
+int send_directory_redirect(int fd, const http_request *req);
 #endif

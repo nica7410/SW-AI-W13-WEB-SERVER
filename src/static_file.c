@@ -15,10 +15,13 @@ int serve_static_at(int fd, const struct local_root *root, const http_request *r
     if (!strcmp(req->method, "POST")) return 405;
     char path[PATH_MAX];
     int file;
-    int status = open_local_file(root, req->path, 1, O_RDONLY | O_NONBLOCK, &file, path);
+    size_t length = strlen(req->path);
+    int directory_index = length && req->path[length - 1] == '/';
+    int status = open_local_file(root, req->path, directory_index, O_RDONLY | O_NONBLOCK, &file, path);
     if (status) return status;
     struct stat st;
     if (fstat(file, &st) < 0) status = 500;
+    else if (S_ISDIR(st.st_mode) && !directory_index) status = send_directory_redirect(fd, req);
     else if (!S_ISREG(st.st_mode)) status = 403;
     else if (st.st_size < 0 || (uintmax_t)st.st_size > SIZE_MAX) status = 500;
     else {

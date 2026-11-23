@@ -39,6 +39,24 @@ static void check_reply(int pair[2], const char *status_line, const char *expect
     close(pair[1]);
 }
 
+static void check_directory_redirect(const struct local_root *root, const char *request_line,
+                                     const char *location_header) {
+    http_request req = {0};
+    CHECK(parse_request_line(request_line, &req) == 0);
+    int pair[2];
+    require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
+    CHECK(serve_static_at(pair[0], root, &req) == 0);
+    shutdown(pair[0], SHUT_WR);
+    char reply[512];
+    CHECK(read_reply(pair[1], reply, sizeof(reply)) > 0);
+    CHECK(strstr(reply, "HTTP/1.1 301 Moved Permanently\r\n") == reply);
+    CHECK(strstr(reply, location_header) && strstr(reply, "\r\nContent-Length: 0\r\n"));
+    CHECK(strstr(reply, "\r\nDate: ") && strstr(reply, "\r\nConnection: keep-alive\r\n"));
+    CHECK_STR(strstr(reply, "\r\n\r\n"), "\r\n\r\n");
+    close(pair[0]);
+    close(pair[1]);
+}
+
 static void test_root_and_file_identity(void) {
     char temp[] = "/tmp/w13-files-XXXXXX";
     int cwd = open(".", O_RDONLY | O_DIRECTORY);
@@ -52,9 +70,19 @@ static void test_root_and_file_identity(void) {
     struct local_root root;
     init_local_root(&root, "root");
     require(root.status == 0, "open root");
+    require(mkdir("root/sub", 0700) == 0, "mkdir sub");
+    write_file("root/sub/index.html", "sub index", 0600);
+    check_directory_redirect(&root, "GET /s%75b?lang=ko HTTP/1.1\r\n",
+                             "\r\nLocation: /s%75b/?lang=ko\r\n");
+    check_directory_redirect(&root, "HEAD ///sub? HTTP/1.1\r\n", "\r\nLocation: /sub/?\r\n");
+    check_directory_redirect(&root, "GET /sub%2F HTTP/1.1\r\n", "\r\nLocation: /sub%2F/\r\n");
     http_request req = {0};
-    CHECK(parse_request_line("GET /internal HTTP/1.1\r\n", &req) == 0);
     int pair[2];
+    CHECK(parse_request_line("GET /s%75b/?lang=ko HTTP/1.1\r\n", &req) == 0);
+    require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
+    CHECK(serve_static_at(pair[0], &root, &req) == 0);
+    check_reply(pair, "HTTP/1.1 200 OK\r\n", "sub index");
+    CHECK(parse_request_line("GET /internal HTTP/1.1\r\n", &req) == 0);
     require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
     CHECK(serve_static_at(pair[0], &root, &req) == 0);
     check_reply(pair, "HTTP/1.1 200 OK\r\n", "original");
@@ -100,6 +128,8 @@ static void test_root_and_file_identity(void) {
     unlink("root/internal");
     unlink("root/external");
     unlink("root/page.txt");
+    unlink("root/sub/index.html");
+    rmdir("root/sub");
     unlink("sibling");
     rmdir("root");
     require(fchdir(cwd) == 0, "restore cwd");
