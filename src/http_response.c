@@ -4,6 +4,17 @@
 #include "server_internal.h"
 #include <stdio.h>
 
+int format_http_date(time_t when, char value[HTTP_DATE_SIZE]) {
+    static const char *const days[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *const months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                         "Jul","Aug","Sep","Oct","Nov","Dec"};
+    struct tm utc;
+    if (!gmtime_r(&when, &utc) || utc.tm_year < -1900 || utc.tm_year > 8099) return 0;
+    return snprintf(value, HTTP_DATE_SIZE, "%s, %02d %s %04d %02d:%02d:%02d GMT",
+                    days[utc.tm_wday], utc.tm_mday, months[utc.tm_mon], utc.tm_year + 1900,
+                    utc.tm_hour, utc.tm_min, utc.tm_sec) == HTTP_DATE_SIZE - 1;
+}
+
 const char *status_text(int status) {
     switch (status) {
     case 200: return "OK";
@@ -30,10 +41,14 @@ const char *status_text(int status) {
 int send_headers(int fd, int status, const char *content_type, size_t content_length,
                  int keep_alive) {
     char headers[512];
+    char date[HTTP_DATE_SIZE];
+    time_t now = time(NULL);
+    int dated = now != (time_t)-1 && format_http_date(now, date);
     int n = snprintf(headers, sizeof(headers),
                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-                     "Connection: %s\r\n%s\r\n", status, status_text(status), content_type,
+                     "Connection: %s\r\n%s%s%s%s\r\n", status, status_text(status), content_type,
                      content_length, keep_alive ? "keep-alive" : "close",
+                     dated ? "Date: " : "", dated ? date : "", dated ? "\r\n" : "",
                      status == 405 ? "Allow: GET, HEAD\r\n" : "");
     if (n < 0 || (size_t)n >= sizeof(headers)) return -1;
     return send_until(fd, headers, (size_t)n, INT64_MAX);

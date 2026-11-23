@@ -3,6 +3,10 @@
 #define HTTP_RESPONSE_H
 
 #include <stddef.h>
+#include <time.h>
+
+#define HTTP_DATE_SIZE 30
+int format_http_date(time_t when, char value[HTTP_DATE_SIZE]);
 
 // 상태 코드 → 사유 문구 (200 → "OK", 404 → "Not Found"). 모르는 코드면 "Unknown"
 const char *status_text(int status);

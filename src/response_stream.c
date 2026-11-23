@@ -3,6 +3,7 @@
 #include "proxy.h"
 #include "upstream.h"
 #include "http_fields.h"
+#include "http_response.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -226,6 +227,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         if (code >= 200) break;
     }
 
+    time_t received = time(NULL);
     int has_length = 0, transfer_encoded = 0, chunked = 0, has_type = 0;
     uintmax_t length = 0;
     for (size_t i = 0; i < fields.count; i++) {
@@ -252,12 +254,20 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     if (!deadline_left(header_end)) return stream_error(from_cgi);
     if (write_line(clientfd, end, "HTTP/1.1 ", reason, reason[3] ? "" : " ") < 0 ||
         write_line(clientfd, end, "Connection", ": ", "close") < 0) return -1;
+    int sent_date = 0;
     for (size_t i = 0; i < fields.count; i++) {
         const char *name = fields.items[i].name;
         if ((from_cgi && !strcasecmp(name, "Status")) || connection_field(&fields, name))
             continue;
+        if (!strcasecmp(name, "Date")) {
+            if (sent_date) continue;
+            sent_date = 1;
+        }
         if (write_line(clientfd, end, name, ": ", fields.items[i].value) < 0) return -1;
     }
+    char date[HTTP_DATE_SIZE];
+    if (!sent_date && received != (time_t)-1 && format_http_date(received, date) &&
+        write_line(clientfd, end, "Date: ", date, "") < 0) return -1;
     if (!from_cgi && is_absolute_uri(req->uri) &&
         write_line(clientfd, end, "Via: ", line[7] == '0' ? "1.0" : "1.1", " w13-proxy") < 0) return -1;
     if (send_until(clientfd, "\r\n", 2, end) < 0) return -1;

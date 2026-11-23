@@ -48,7 +48,8 @@ static void test_forward_post_and_chunked_response(void) {
     memset(value, 'v', sizeof(value) - 1);
     value[sizeof(value) - 1] = '\0';
     CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
-                             "Via: 1.0 inner\r\nConnection: X-Local\r\nX-Local: drop\r\n"
+                             "Via: 1.0 inner\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n"
+                             "Connection: X-Local\r\nX-Local: drop\r\n"
                              "X:%s\r\n\r\n", value) > 0);
     CHECK(rio_writen(origin[1], chunks, sizeof(chunks) - 1) > 0);
     // No shutdown from origin: only the end of the trailer section completes this reply.
@@ -66,6 +67,8 @@ static void test_forward_post_and_chunked_response(void) {
 
     n = finish_and_read(client, wire, sizeof(wire));
     CHECK(strstr(wire, "HTTP/1.1 200 OK\r\n") == wire);
+    char *date = strstr(wire, "\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n");
+    CHECK(date && !strstr(date + 1, "\r\nDate: "));
     CHECK(!strstr(wire, "X-Local") && strstr(wire, "Via: 1.0 inner\r\n") &&
           strstr(wire, "Via: 1.1 w13-proxy\r\n"));
     const char *field = strstr(wire, "\r\nX: ");
@@ -169,6 +172,8 @@ static void test_connection_failover(void) {
     CHECK(strstr(wire, "\r\n\r\nx") != NULL);
     finish_and_read(client, wire, sizeof(wire));
     CHECK(strstr(wire, "HTTP/1.1 200 OK") == wire && strstr(wire, "\r\n\r\nok"));
+    char *date = strstr(wire, "\r\nDate: ");
+    CHECK(date && !strstr(date + 1, "\r\nDate: "));
     close(origin[1]);
     close_pair(client);
 }

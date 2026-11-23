@@ -1,5 +1,6 @@
 #include "test.h"
 #include "net.h"
+#include "http_response.h"
 #include "server.h"
 #include "server_internal.h"
 #include <arpa/inet.h>
@@ -35,6 +36,8 @@ static void check_reply(int pair[2], const char *status_line, const char *expect
     char data[512];
     CHECK(read_reply(pair[1], data, sizeof(data)) > 0);
     CHECK(strncmp(data, status_line, strlen(status_line)) == 0);
+    char *date = strstr(data, "\r\nDate: ");
+    CHECK(date && strstr(date + 1, "\r\nDate: ") == NULL);
     char *body = strstr(data, "\r\n\r\n");
     CHECK(body && !strcmp(body + 4, expected_body));
     close(pair[0]);
@@ -167,6 +170,8 @@ static void test_error_on_wire(int head) {
 }
 
 int main(void) {
+    char date[HTTP_DATE_SIZE];
+    CHECK(format_http_date(0, date) && !strcmp(date, "Thu, 01 Jan 1970 00:00:00 GMT"));
     signal(SIGPIPE, SIG_IGN);
     alarm(8);
     test_root_and_file_identity();
