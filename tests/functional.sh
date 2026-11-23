@@ -25,7 +25,7 @@ fetch() { curl --noproxy '*' --max-time 8 -sS "$@"; }
 start() {
     local number=$1
     shift
-    ./bin/server -p "$number" "$@" >"$tmp/$number.log" 2>&1 &
+    "${SERVER_BIN:-./bin/server}" -p "$number" -g "${CGI_DIR:-./cgi-bin}" "$@" >"$tmp/$number.log" 2>&1 &
     local pid=$!
     pids+=("$pid")
     for ((i=0; i<60; i++)); do

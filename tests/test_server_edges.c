@@ -111,7 +111,7 @@ static void test_root_and_file_identity(void) {
 
 static void test_cgi_adder(void) {
     struct local_root root;
-    init_local_root(&root, "cgi-bin");
+    init_local_root(&root, TEST_CGI_DIR);
     require(root.status == 0, "open cgi-bin");
     http_request req = {0};
     CHECK(parse_request_line("GET /cgi-bin/adder?a=17&b=25 HTTP/1.1\r\n", &req) == 0);

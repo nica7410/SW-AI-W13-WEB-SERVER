@@ -69,7 +69,7 @@ WSL2(Ubuntu) / Linux / macOS
 ```bash
 make            # bin/server, cgi-bin/adder
 make test       # 단위 테스트
-make asan       # AddressSanitizer + UBSan으로 다시 빌드 후 테스트 (-j에서도 clean이 먼저 끝남)
+make asan       # build/asan, bin/asan에 ASan·UBSan 빌드 후 단위 테스트
 make clean
 
 ./bin/server -p 8080 -r ./www                          # 웹서버
@@ -105,6 +105,8 @@ curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
 | `bash tests/load.sh` | 실행 중인 서버에 동시 접속 수를 바꿔 가며 요청을 보내 처리량·실패·최장 지연 측정 |
 
 기능 테스트는 `make` 후 실행하며 Bash, curl, Python 3과 연속된 빈 포트 6개가 필요합니다. 기본 포트는 18080~18085이고 `PORT=19080 bash tests/functional.sh`처럼 바꿀 수 있습니다.
+
+sanitizer 서버와 CGI로 기능 테스트를 실행하려면 `SERVER_BIN=./bin/asan/server CGI_DIR=./bin/asan/cgi-bin bash tests/functional.sh`를 사용합니다. 일반 실행 파일은 `bin/server`와 `cgi-bin/adder`에 있습니다.
 
 부하 스크립트는 `ab`(없으면 `wrk`)를 사용합니다. `URL`, `CONCURRENCY`(공백으로 구분한 목록), `REQUESTS`, `KEEPALIVE=1`로 조건을 바꿉니다.
 
