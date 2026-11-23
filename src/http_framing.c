@@ -58,7 +58,7 @@ int parse_transfer_codings(const char *p, int *chunked) {
     }
 }
 
-int parse_chunk_size(const char *p, uintmax_t *size) {
+int parse_chunk_size(const char *p, uintmax_t *size, size_t *extension_bytes) {
     for (const unsigned char *c = (const unsigned char *)p; *c; c++)
         if ((*c < 32 && *c != '\t') || *c == 127) return 0;
     const char *start = p;
@@ -72,7 +72,9 @@ int parse_chunk_size(const char *p, uintmax_t *size) {
         if (n > (UINTMAX_MAX - digit) / 16) return 0;
         n = n * 16 + digit;
     }
+    const char *suffix = p;
     if (p == start || !read_parameters(&p, 0) || *p) return 0;
+    if (extension_bytes) *extension_bytes = strchr(suffix, ';') ? (size_t)(p - suffix) : 0;
     *size = n;
     return 1;
 }

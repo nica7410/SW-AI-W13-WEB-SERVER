@@ -207,14 +207,21 @@ static int read_trailers(rio_t *rp, deadline_ms end) {
 
 static int read_chunked_request(rio_t *rp, http_request *req, deadline_ms end) {
     size_t capacity = 0;
+    size_t extensions_left = MAX_CHUNK_EXTENSION_BYTES;
     for (;;) {
         char line[MAX_LINE + 1];
         if (!deadline_left(end)) return 408;
         int status = read_line(rp, line, 400, end);
         if (status) return status;
-        line[strlen(line) - 2] = '\0';
+        size_t line_len = strlen(line) - 2;
+        line[line_len] = '\0';
         uintmax_t chunk;
-        if (!parse_chunk_size(line, &chunk)) return 400;
+        size_t extension_bytes;
+        if (!parse_chunk_size(line, &chunk, &extension_bytes)) return 400;
+        char last = line[line_len - 1];
+        if (!extension_bytes && (last == ' ' || last == '\t')) return 400;
+        if (extension_bytes > extensions_left) return 413;
+        extensions_left -= extension_bytes;
         if (!chunk) return read_trailers(rp, end);
         if (chunk > MAX_BODY_LEN - req->content_length) return 413;
         size_t needed = req->content_length + (size_t)chunk;

@@ -251,6 +251,34 @@ static void check_chunk_error(const char *fields_and_chunks, int expected) {
     close(pair[1]);
 }
 
+static void check_chunk_extension_limit(int extra, int expected) {
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) { CHECK(0); return; }
+    // Queue the whole fixture even on systems with a small socketpair send buffer.
+    int buffer_size = MAX_CHUNK_EXTENSION_BYTES * 2;
+    CHECK(setsockopt(pair[1], SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size)) == 0);
+    char value[MAX_CHUNK_EXTENSION_BYTES / 2 + 1];
+    memset(value, 'a', sizeof(value) - 1);
+    value[sizeof(value) - 1] = '\0';
+    const char *quoted = " \t;x=\"", *terminal = " ;y=";
+    int half = MAX_CHUNK_EXTENSION_BYTES / 2;
+    CHECK(dprintf(pair[1], "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
+                           "1%s%.*s\"\r\nx\r\n01\r\ny\r\n0%s%.*s\r\n%s",
+                  quoted, half - (int)strlen(quoted) - 1, value,
+                  terminal, MAX_CHUNK_EXTENSION_BYTES - half - (int)strlen(terminal) + extra,
+                  value, extra ? "" : "\r\n") > 0);
+    shutdown(pair[1], SHUT_WR);
+    rio_t in;
+    rio_readinitb(&in, pair[0]);
+    http_request req;
+    CHECK(read_request(&in, &req) == expected);
+    if (!expected) CHECK(req.content_length == 2 && req.body && !memcmp(req.body, "xy", 2));
+    else CHECK(req.body == NULL);
+    free_request(&req);
+    close(pair[0]);
+    close(pair[1]);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_host_syntax();
@@ -258,8 +286,12 @@ int main(void) {
     test_header_deadline();
     test_body_deadline();
     test_chunked_request();
+    check_chunk_extension_limit(0, 0);
+    check_chunk_extension_limit(1, 413);
     check_chunk_error("Content-Length: 0\r\n\r\n", 400);
     check_chunk_error("\r\n100001\r\n", 413);
+    check_chunk_error("\r\n1 \r\n", 400);
+    check_chunk_error("\r\n0\t\r\n", 400);
     check_chunk_error("\r\n1\r\nx!!", 400);
     check_chunk_error("\r\n0\r\nHost: changed\r\n\r\n", 400);
     test_body_io_error(0);

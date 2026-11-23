@@ -18,6 +18,7 @@
 #define MAX_HEADER_NAME  64
 #define MAX_HEADER_VALUE 1024            // 넘으면 431
 #define MAX_BODY_LEN     (1024 * 1024)   // 넘으면 413
+#define MAX_CHUNK_EXTENSION_BYTES 8192   // 요청 한 건의 청크 확장 총량
 
 typedef struct {
     char name[MAX_HEADER_NAME];
