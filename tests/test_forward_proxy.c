@@ -1,27 +1,33 @@
-// [test_forward_proxy.c] Forward Proxy 절대 URI 파싱 단위 테스트
 #include "test.h"
 #include "forward_proxy.h"
 
-// "http://..." / "HTTP://..." → 1, "/index.html", "https://..." → 0
-static void test_is_absolute_uri(void) { /* TODO */ }
-
-// "http://example.com/a.html" → host "example.com", port "80", path "/a.html"
-static void test_parse_default_port(void) { /* TODO */ }
-
-// "http://localhost:8001/api?x=1" → port "8001", path "/api?x=1" (쿼리 유지)
-static void test_parse_port_and_query(void) { /* TODO */ }
-
-// "http://example.com" (경로 없음) → path "/"
-static void test_parse_no_path(void) { /* TODO */ }
-
-// 오류: "http:///a" (호스트 없음), "http://h:99999/" (포트 범위 밖), 버퍼보다 긴 호스트 → -1
-static void test_parse_errors(void) { /* TODO */ }
-
 int main(void) {
-    test_is_absolute_uri();
-    test_parse_default_port();
-    test_parse_port_and_query();
-    test_parse_no_path();
-    test_parse_errors();
+    char host[64], port[8], path[128];
+    CHECK(is_absolute_uri("HTTP://example.com/"));
+    CHECK(!is_absolute_uri("/index.html"));
+    CHECK(!is_absolute_uri("https://example.com"));
+    CHECK(parse_absolute_uri("http://example.com/a.html", host, sizeof(host),
+                             port, sizeof(port), path, sizeof(path)) == 0);
+    CHECK_STR(host, "example.com");
+    CHECK_STR(port, "80");
+    CHECK_STR(path, "/a.html");
+    CHECK(parse_absolute_uri("http://localhost:8001/api?x=1", host, sizeof(host),
+                             port, sizeof(port), path, sizeof(path)) == 0);
+    CHECK_STR(port, "8001");
+    CHECK_STR(path, "/api?x=1");
+    CHECK(parse_absolute_uri("http://h", host, sizeof(host), port, sizeof(port),
+                             path, sizeof(path)) == 0);
+    CHECK_STR(path, "/");
+    CHECK(parse_absolute_uri("http://[::1]?q", host, sizeof(host), port, sizeof(port),
+                             path, sizeof(path)) == 0);
+    CHECK_STR(host, "::1");
+    CHECK_STR(path, "/?q");
+    const char *invalid[] = {"http:///a", "http://h:0", "http://h:99999/", "http://h:x",
+                             "http://user@h/", "https://h/"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        CHECK(parse_absolute_uri(invalid[i], host, sizeof(host), port, sizeof(port),
+                                 path, sizeof(path)) == -1);
+    CHECK(parse_absolute_uri("http://toolong", host, 3, port, sizeof(port),
+                             path, sizeof(path)) == -1);
     return TEST_RESULT();
 }
