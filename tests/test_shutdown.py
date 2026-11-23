@@ -1,19 +1,26 @@
-"""Check completed CGI responses and SIGTERM. Run from the repository root."""
+"""Check server startup, completed CGI responses and SIGTERM from the repository root."""
 import http.client
 import os
 from pathlib import Path
+import resource
 import socket
 import subprocess
 import tempfile
 import time
 
 
-def start_server(root):
+def server_command(root, workers):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    server = subprocess.Popen([os.environ.get("SERVER_BIN", "./bin/server"), "-p", str(port),
-                               "-r", root, "-g", root, "-t", "1"])
+    command = [os.environ.get("SERVER_BIN", "./bin/server"), "-p", str(port),
+               "-r", root, "-g", root, "-t", str(workers)]
+    return command, port
+
+
+def start_server(root, workers=1, **popen_options):
+    command, port = server_command(root, workers)
+    server = subprocess.Popen(command, **popen_options)
     client = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     end = time.monotonic() + 2
     try:
@@ -30,6 +37,30 @@ def start_server(root):
         server.kill()
         server.wait()
         raise
+
+
+def test_startup_fd_budget():
+    with tempfile.TemporaryDirectory() as tmp:
+        body = b"fd budget\n"
+        Path(tmp, "index.html").write_bytes(body)
+        command, _ = server_command(tmp, 8)
+        rejected = subprocess.run(command, stderr=subprocess.PIPE, text=True, timeout=3,
+                                  preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (160, 160)))
+        assert rejected.returncode == 1, rejected
+        assert "limit 160 is too low for 8 workers (minimum 161" in rejected.stderr, rejected.stderr
+
+        server, client = start_server(tmp, workers=8, stderr=subprocess.PIPE, text=True,
+                                      preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (161, 161)))
+        try:
+            client.request("GET", "/index.html")
+            response = client.getresponse()
+            assert response.status == 200 and response.read() == body
+        finally:
+            client.close()
+            server.terminate()
+            _, warning = server.communicate(timeout=7)
+        assert "queue size 1024 exceeds the open file limit 161; using 1" in warning, warning
+        print("FD limit 160: startup rejected; 161: queue size 1, static GET 200")
 
 
 def test_completed_cgi_close():
@@ -121,5 +152,6 @@ for i in range(24):
 
 
 if __name__ == "__main__":
+    test_startup_fd_budget()
     test_completed_cgi_close()
     test_shutdown()

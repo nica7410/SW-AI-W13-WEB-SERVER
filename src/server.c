@@ -60,7 +60,12 @@ static int fit_queue_to_fd_limit(int threads, int queue) {
         if (setrlimit(RLIMIT_NOFILE, &next) == 0) limit.rlim_cur = raised;
     }
     if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= want) return queue;
-    int fitted = limit.rlim_cur > reserve ? (int)(limit.rlim_cur - reserve) : 1;
+    if (limit.rlim_cur <= reserve) {
+        fprintf(stderr, "open file limit %llu is too low for %d workers (minimum %llu with one queue slot)\n",
+                (unsigned long long)limit.rlim_cur, threads, (unsigned long long)(reserve + 1));
+        return -1;
+    }
+    int fitted = (int)(limit.rlim_cur - reserve);
     fprintf(stderr, "queue size %d exceeds the open file limit %llu; using %d\n",
             queue, (unsigned long long)limit.rlim_cur, fitted);
     return fitted;
@@ -207,6 +212,8 @@ void handle_connection(int connfd) {
 }
 
 int run_server(const server_config *cfg) {
+    int queue_size = fit_queue_to_fd_limit(cfg->threads, cfg->queue_size);
+    if (queue_size < 0) return -1;
     g_cfg = cfg;
     g_routes.count = 0;
     if (cfg->routes_path && load_routes(cfg->routes_path, &g_routes) < 0) return -1;
@@ -229,7 +236,6 @@ int run_server(const server_config *cfg) {
         close(listenfd);
         goto close_roots;
     }
-    int queue_size = fit_queue_to_fd_limit(cfg->threads, cfg->queue_size);
     if (!*proxy_via_comment())
         fprintf(stderr, "warning: using only socket addresses for proxy loop detection\n");
     threadpool *pool = threadpool_create(cfg->threads, queue_size, handle_connection);
