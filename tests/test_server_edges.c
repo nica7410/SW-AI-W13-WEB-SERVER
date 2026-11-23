@@ -157,6 +157,29 @@ static void *handle(void *arg) {
     return NULL;
 }
 
+static void test_yielded_error_response(void) {
+    int pair[2];
+    require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
+    http_request req = {.method = "GET", .keep_alive = 0};
+    require(write(pair[1], "next", 4) == 4, "pending input");
+    require(shutdown(pair[1], SHUT_WR) == 0, "shutdown client write");
+    CHECK(finish_request(pair[0], &req, 404, 50) == 0);
+    char pending;
+    CHECK(recv(pair[0], &pending, 1, MSG_DONTWAIT) == 0);
+
+    char reply[512];
+    CHECK(read_reply(pair[1], reply, sizeof(reply)) > 0);
+    CHECK(strstr(reply, "HTTP/1.1 404 Not Found\r\n") == reply);
+    CHECK(strstr(reply, "\r\nConnection: close\r\n"));
+    const char *length = strstr(reply, "\r\nContent-Length: ");
+    const char *body = strstr(reply, "\r\n\r\n");
+    size_t declared;
+    CHECK(length && sscanf(length, "\r\nContent-Length: %zu", &declared) == 1 &&
+          body && declared > 0 && strlen(body + 4) == declared);
+    close(pair[0]);
+    close(pair[1]);
+}
+
 static void test_error_on_wire(int head) {
     int pair[2];
     tcp_pair(pair);
@@ -187,6 +210,7 @@ int main(void) {
     alarm(8);
     test_root_and_file_identity();
     test_cgi_adder();
+    test_yielded_error_response();
     test_error_on_wire(1);
     test_error_on_wire(0);
     return TEST_RESULT();

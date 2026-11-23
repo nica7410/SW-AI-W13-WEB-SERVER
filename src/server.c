@@ -116,6 +116,13 @@ static void linger_close_input(int fd, int milliseconds) {
     }
 }
 
+int finish_request(int fd, const http_request *req, int result, int linger_ms) {
+    if (result > 0)
+        result = send_request_error(fd, result, req->keep_alive, !strcmp(req->method, "HEAD"));
+    if (!result && linger_ms > 0) linger_close_input(fd, linger_ms);
+    return result;
+}
+
 // 503을 보낸 연결의 입력을 버린다. 계속 붙잡을 연결이면 1, 이제 close할 연결이면 0
 static int drain_rejected(int fd, short revents, deadline_ms end) {
     if (!deadline_left(end)) return 0;
@@ -176,19 +183,17 @@ void handle_connection(int connfd) {
         http_request req;
         int result = read_request(&rio, &req);
         if (g_cfg && g_cfg->verbose && (result >= 0 || *req.method)) access_begin();
-        int rejected = result > 0;
-        // 응답 시점에 쉬는 워커가 없고 큐에 기다리는 연결이 있으면 이 응답을 마지막으로 연결을 넘긴다.
-        // 그래서 동시 keep-alive 연결이 워커 수보다 많으면 연결 재사용 없이 돌아가며 처리된다.
-        int yielded = !result && req.keep_alive && others_waiting();
-        if (yielded || atomic_load_explicit(&g_stop, memory_order_relaxed)) req.keep_alive = 0;
-        if (!result) result = dispatch(connfd, &req);
-        else req.keep_alive = 0;
-        if (result > 0) {
-            result = send_request_error(connfd, result, req.keep_alive, !strcmp(req.method, "HEAD"));
-            if (rejected && !result) linger_close_input(connfd, 250);
-        } else if (yielded && !result) {
-            linger_close_input(connfd, 50);   // 파이프라이닝으로 이어 보낸 요청이 있어도 응답을 지킨다
+        int linger_ms = 0;
+        if (result) {
+            req.keep_alive = 0;
+            if (result > 0) linger_ms = 250;
+        } else {
+            // 대기 중인 연결에 워커를 양보할 때는 이 응답을 마지막으로 보낸다.
+            if (req.keep_alive && others_waiting()) linger_ms = 50;
+            if (linger_ms || atomic_load_explicit(&g_stop, memory_order_relaxed)) req.keep_alive = 0;
+            result = dispatch(connfd, &req);
         }
+        result = finish_request(connfd, &req, result, linger_ms);
         access_finish(&req, result);
         free_request(&req);
         if (result < 0 || !req.keep_alive) break;
