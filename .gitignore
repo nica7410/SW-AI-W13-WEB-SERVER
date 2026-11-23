@@ -58,3 +58,4 @@ dkms.conf
 bin/
 build/
 cgi-bin/adder
+.omc/
