@@ -1,4 +1,5 @@
 #include "static_file.h"
+#include "deadline.h"
 #include "server_internal.h"
 #include "http_response.h"
 #include "local_path.h"
@@ -29,7 +30,7 @@ int serve_static_at(int fd, const struct local_root *root, const http_request *r
             size_t take = remaining < sizeof(buf) ? remaining : sizeof(buf);
             ssize_t n = read(file, buf, take);
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0 || rio_writen(fd, buf, (size_t)n) < 0) status = -1;
+            if (n <= 0 || send_until(fd, buf, (size_t)n, INT64_MAX) < 0) status = -1;
             else remaining -= (size_t)n;
         }
     }

@@ -155,7 +155,7 @@ int read_request(rio_t *rp, http_request *req) {
         if (!req->body) return 500;
         static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
         if (expect && strcmp(req->version, "HTTP/1.0") &&
-            rio_writen(rp->fd, interim, sizeof(interim) - 1) < 0) goto body_io_error;
+            send_until(rp->fd, interim, sizeof(interim) - 1, INT64_MAX) < 0) goto body_io_error;
         ssize_t got = rio_readn_until(rp, req->body, req->content_length,
                                       deadline_after(REQUEST_BODY_TIMEOUT_MS));
         if (got != (ssize_t)req->content_length) {

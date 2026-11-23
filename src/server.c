@@ -32,6 +32,7 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal handler needs lock-free atomic
 // 유휴 keep-alive 연결이 이 시간보다 오래 조용하고 큐에 기다리는 연결이 있으면 워커를 양보한다
 #define IDLE_YIELD_GRACE_MS 100
 #define IDLE_POLL_SLICE_MS  50
+#define SHUTDOWN_GRACE_MS 5000
 
 // 큐가 가득 차 503을 보낸 연결은 클라이언트가 닫을 때까지 최대 이 수만큼 잠깐 붙잡는다
 #define MAX_REJECTED     64
@@ -103,7 +104,10 @@ static int drain_rejected(int fd, short revents, deadline_ms end) {
     char discard[RIO_BUFSIZE];
     for (;;) {
         ssize_t n = recv(fd, discard, sizeof(discard), MSG_DONTWAIT);
-        if (n > 0) continue;
+        if (n > 0) {
+            if (!deadline_left(end)) return 0;
+            continue;
+        }
         if (n < 0 && errno == EINTR) continue;
         return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);   // EOF·오류면 닫는다
     }
@@ -119,6 +123,8 @@ static int others_waiting(void) {
 //   큐에서 기다리는 연결이 생겼을 때 유휴 연결을 닫고 양보한다. 서버가 유휴 keep-alive 연결을 먼저
 //   닫는 것은 HTTP가 허용하는 동작이다 (RFC 9112 9.6). 새 연결의 첫 요청은 양보하지 않는다.
 static int wait_request_start(const rio_t *rio, int allow_yield) {
+    if (atomic_load_explicit(&g_stop, memory_order_relaxed) &&
+        (allow_yield || !deadline_left(INT64_MAX))) return -1;
     if (rio->cnt) return 0;   // 파이프라이닝으로 이미 받은 요청
     deadline_ms start = deadline_after(0);
     deadline_ms end = start + KEEPALIVE_TIMEOUT_SEC * 1000;
@@ -129,7 +135,7 @@ static int wait_request_start(const rio_t *rio, int allow_yield) {
         if (!left) return -1;
         int slice = stopping ? 0 : left < IDLE_POLL_SLICE_MS ? left : IDLE_POLL_SLICE_MS;
         int ready = poll(&p, 1, slice);
-        if (ready > 0) return 0;
+        if (ready > 0) return stopping && allow_yield ? -1 : 0;
         if (ready < 0 && errno != EINTR) return -1;
         if (stopping) return -1;
         if (allow_yield && deadline_after(0) - start >= IDLE_YIELD_GRACE_MS && others_waiting())
@@ -153,7 +159,7 @@ void handle_connection(int connfd) {
         // 응답 시점에 쉬는 워커가 없고 큐에 기다리는 연결이 있으면 이 응답을 마지막으로 연결을 넘긴다.
         // 그래서 동시 keep-alive 연결이 워커 수보다 많으면 연결 재사용 없이 돌아가며 처리된다.
         int yielded = !result && req.keep_alive && others_waiting();
-        if (yielded) req.keep_alive = 0;
+        if (yielded || atomic_load_explicit(&g_stop, memory_order_relaxed)) req.keep_alive = 0;
         if (!result) result = dispatch(connfd, &req);
         else req.keep_alive = 0;
         if (result > 0) {
@@ -210,6 +216,7 @@ int run_server(const server_config *cfg) {
         fds[0].events = nfds < 1 + MAX_REJECTED ? POLLIN : 0;
         // 종료 신호가 워커에서 처리되거나 poll 직전에 도착해도 accept에 갇히지 않는다.
         int ready = poll(fds, (nfds_t)nfds, nfds > 1 ? 50 : 250);
+        if (atomic_load_explicit(&g_stop, memory_order_relaxed)) break;
         if (ready < 0 && errno == EINTR) continue;
         if (ready < 0 || (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
             status = -1;
@@ -251,6 +258,8 @@ int run_server(const server_config *cfg) {
             }
         }
     }
+    request_stop();
+    set_shutdown_deadline(deadline_after(SHUTDOWN_GRACE_MS));
     for (int i = 1; i < nfds; i++) close(fds[i].fd);
     close(listenfd);
     threadpool_destroy(pool);

@@ -1,5 +1,6 @@
 #include "test.h"
 #include "proxy.h"
+#include "response_stream.h"
 #include "upstream.h"
 #include <errno.h>
 #include <pthread.h>
@@ -93,6 +94,38 @@ static void test_truncated_chunk(void) {
     CHECK(!strstr(wire + 1, "HTTP/") && !strstr(wire, "0\r\n\r\n"));
     close_pair(client);
     close_pair(origin);
+}
+
+static void *write_finite_body(void *arg) {
+    int fd = *(int *)arg;
+    for (int i = 0; i < 15; i++) {
+        if (write(fd, "x", 1) != 1) break;
+        struct timespec pause = {.tv_nsec = 20000000};
+        nanosleep(&pause, NULL);
+    }
+    shutdown(fd, SHUT_WR);
+    return NULL;
+}
+
+static void test_total_response_deadline(void) {
+    int client[2], origin[2];
+    make_pair(client);
+    make_pair(origin);
+    http_request req = {0};
+    CHECK(parse_request_line("GET / HTTP/1.1\r\n", &req) == 0);
+    CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nx") > 0);
+    pthread_t writer;
+    if (pthread_create(&writer, NULL, write_finite_body, &origin[1])) exit(1);
+    deadline_ms end = deadline_after(100);
+    CHECK(response_until(client[0], origin[0], &req, 0, end, end) == -1);
+    char wire[512];
+    finish_and_read(client, wire, sizeof(wire));
+    char *body = strstr(wire, "\r\n\r\n");
+    CHECK(strstr(wire, "HTTP/1.1 200 OK") == wire && !strstr(wire + 1, "HTTP/"));
+    CHECK(body && body[4] == 'x' && strlen(body + 4) < 16);
+    pthread_join(writer, NULL);
+    close_pair(origin);
+    close_pair(client);
 }
 
 static int connect_calls, healthy_fd;
@@ -207,6 +240,7 @@ int main(void) {
     alarm(8);
     test_forward_post_and_chunked_response();
     test_truncated_chunk();
+    test_total_response_deadline();
     test_connection_failover();
     test_deadline();
     return TEST_RESULT();

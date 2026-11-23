@@ -60,6 +60,7 @@ static void init_query_condition(void) {
 }
 
 static int wait_for_query(deadline_ms end) {
+    end = effective_deadline(end);
     int left = deadline_left(end);
     if (!left) return ETIMEDOUT;
 #ifdef __APPLE__

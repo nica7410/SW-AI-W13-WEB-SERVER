@@ -23,6 +23,7 @@ static int stream_error(int cgi) {
 
 // '\r\n'을 제거한 한 줄을 반환한다. CGI 프로그램은 '\n'도 쓸 수 있다.
 static int next_line(rio_t *rio, char *line, int cgi, deadline_ms end) {
+    if (!deadline_left(end)) return stream_error(cgi);
     ssize_t n = rio_readline_until(rio, line, MAX_LINE + 1, end);
     if (n < 0) return stream_error(cgi);
     if (!n || line[n - 1] != '\n' || memchr(line, '\0', (size_t)n)) goto invalid;
@@ -71,26 +72,15 @@ static int connection_field(const struct fields *f, const char *name) {
     return 0;
 }
 
-static int body_to_client(rio_t *rio, int client, int known_length, uintmax_t left) {
+static int body_to_client(rio_t *rio, int client, int known_length, uintmax_t left,
+                          deadline_ms end) {
     char buf[RIO_BUFSIZE];
     while (!known_length || left) {
         size_t want = sizeof(buf);
         if (known_length && left < want) want = (size_t)left;
-        ssize_t n;
-        const char *data;
-        if (rio->cnt) {
-            n = (size_t)rio->cnt < want ? rio->cnt : (ssize_t)want;
-            data = rio->bufp;
-            rio->cnt -= n;
-            rio->bufp += n;
-        } else {
-            data = buf;
-            n = read(rio->fd, buf, want);
-            if (n < 0 && errno == EINTR) continue;
-            if (!n) return known_length ? -1 : 0;
-            if (n < 0) return -1;
-        }
-        if (rio_writen(client, data, (size_t)n) < 0) return -1;
+        ssize_t n = rio_readsome_until(rio, buf, want, end);
+        if (!n) return known_length ? -1 : 0;
+        if (n < 0 || send_until(client, buf, (size_t)n, end) < 0) return -1;
         if (known_length) left -= (size_t)n;
     }
     return 0;
@@ -170,39 +160,40 @@ static int parse_chunk(const char *p, uintmax_t *size) {
     return 1;
 }
 
-static int write_line(int fd, const char *first, const char *second, const char *third) {
+static int write_line(int fd, deadline_ms end, const char *first, const char *second,
+                      const char *third) {
     // A CGI status value can gain a protocol prefix, a space and CRLF on output.
     char wire[MAX_LINE + sizeof("HTTP/1.1  \r\n")];
     int n = snprintf(wire, sizeof(wire), "%s%s%s\r\n", first, second, third);
     if (n < 0 || (size_t)n >= sizeof(wire)) return -1;
-    return rio_writen(fd, wire, (size_t)n) < 0 ? -1 : 0;
+    return send_until(fd, wire, (size_t)n, end);
 }
 
-static int chunked_body(rio_t *rio, int clientfd, struct fields *fields) {
+static int chunked_body(rio_t *rio, int clientfd, struct fields *fields, deadline_ms end) {
     char line[MAX_LINE + 1];
     for (;;) {
         uintmax_t size;
-        if (next_line(rio, line, 0, 0) || !parse_chunk(line, &size)) return -1;
+        if (next_line(rio, line, 0, end) || !parse_chunk(line, &size)) return -1;
         if (!size) break;
-        if (write_line(clientfd, line, "", "") < 0 ||
-            body_to_client(rio, clientfd, 1, size) < 0) return -1;
+        if (write_line(clientfd, end, line, "", "") < 0 ||
+            body_to_client(rio, clientfd, 1, size, end) < 0) return -1;
         char crlf[2];
-        if (rio_readnb(rio, crlf, 2) != 2 || memcmp(crlf, "\r\n", 2) ||
-            rio_writen(clientfd, crlf, 2) < 0) return -1;
+        if (rio_readn_until(rio, crlf, 2, end) != 2 || memcmp(crlf, "\r\n", 2) ||
+            send_until(clientfd, crlf, 2, end) < 0) return -1;
     }
     // Signal completion downstream only once the entire trailer section is valid.
-    if (read_fields(rio, fields, 0, 0)) return -1;
+    if (read_fields(rio, fields, 0, end)) return -1;
     for (size_t i = 0; i < fields->count; i++) {
         const char *name = fields->items[i].name;
         if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding") ||
             !strcasecmp(name, "Host") || !strcasecmp(name, "Trailer") ||
             connection_field(fields, name)) return -1;
     }
-    if (write_line(clientfd, line, "", "") < 0) return -1;
+    if (write_line(clientfd, end, line, "", "") < 0) return -1;
     for (size_t i = 0; i < fields->count; i++)
-        if (write_line(clientfd, fields->items[i].name, ": ", fields->items[i].value) < 0)
+        if (write_line(clientfd, end, fields->items[i].name, ": ", fields->items[i].value) < 0)
             return -1;
-    return rio_writen(clientfd, "\r\n", 2) < 0 ? -1 : 0;
+    return send_until(clientfd, "\r\n", 2, end);
 }
 
 static int status_code(const char *text) {
@@ -212,7 +203,8 @@ static int status_code(const char *text) {
 }
 
 int response_until(int clientfd, int source, const http_request *req, int from_cgi,
-                   deadline_ms end) {
+                   deadline_ms header_end, deadline_ms end) {
+    if (end < header_end) header_end = end;
     rio_t rio;
     rio_readinitb(&rio, source);
     struct fields fields;
@@ -222,14 +214,14 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     // 요청의 Expect는 앞단에서 처리했다. 원 서버의 중간 응답은 건너뛴다.
     for (;;) {
         if (!from_cgi) {
-            int rc = next_line(&rio, line, 0, end);
+            int rc = next_line(&rio, line, 0, header_end);
             if (rc) return rc;
             if (strncmp(line, "HTTP/1.0 ", 9) && strncmp(line, "HTTP/1.1 ", 9)) return 502;
             reason = line + 9;
             code = status_code(reason);
             if (!code || code == 101) return 502;
         }
-        int rc = read_fields(&rio, &fields, from_cgi, end);
+        int rc = read_fields(&rio, &fields, from_cgi, header_end);
         if (rc) return rc;
         if (code >= 200) break;
     }
@@ -257,24 +249,25 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     }
     if ((has_length && transfer_encoded) || (from_cgi && !has_type)) return error;
 
-    if (end && !deadline_left(end)) return 504;
-    if (write_line(clientfd, "HTTP/1.1 ", reason, reason[3] ? "" : " ") < 0 ||
-        write_line(clientfd, "Connection", ": ", "close") < 0) return -1;
+    if (!deadline_left(header_end)) return stream_error(from_cgi);
+    if (write_line(clientfd, end, "HTTP/1.1 ", reason, reason[3] ? "" : " ") < 0 ||
+        write_line(clientfd, end, "Connection", ": ", "close") < 0) return -1;
     for (size_t i = 0; i < fields.count; i++) {
         const char *name = fields.items[i].name;
         if ((from_cgi && !strcasecmp(name, "Status")) || connection_field(&fields, name))
             continue;
-        if (write_line(clientfd, name, ": ", fields.items[i].value) < 0) return -1;
+        if (write_line(clientfd, end, name, ": ", fields.items[i].value) < 0) return -1;
     }
     if (!from_cgi && is_absolute_uri(req->uri) &&
-        write_line(clientfd, "Via: ", line[7] == '0' ? "1.0" : "1.1", " w13-proxy") < 0) return -1;
-    if (rio_writen(clientfd, "\r\n", 2) < 0) return -1;
+        write_line(clientfd, end, "Via: ", line[7] == '0' ? "1.0" : "1.1", " w13-proxy") < 0) return -1;
+    if (send_until(clientfd, "\r\n", 2, end) < 0) return -1;
     if (!strcmp(req->method, "HEAD") || code == 204 || code == 304) return 0;
-    if (chunked) return chunked_body(&rio, clientfd, &fields);
-    return body_to_client(&rio, clientfd, has_length, length);
+    if (chunked) return chunked_body(&rio, clientfd, &fields, end);
+    return body_to_client(&rio, clientfd, has_length, length, end);
 }
 
 int relay_response(int clientfd, int source, const http_request *req, int from_cgi) {
-    deadline_ms end = from_cgi ? 0 : deadline_after(PROXY_TIMEOUT_SEC * 1000);
-    return response_until(clientfd, source, req, from_cgi, end);
+    deadline_ms end = deadline_after(RESPONSE_TIMEOUT_MS);
+    deadline_ms head = from_cgi ? end : deadline_after(PROXY_TIMEOUT_SEC * 1000);
+    return response_until(clientfd, source, req, from_cgi, head, end);
 }

@@ -8,6 +8,7 @@
 #include "response_stream.h"
 #include "server.h"
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,9 +42,11 @@ static void close_interval(unsigned first, unsigned last) {
     for (unsigned fd = first; fd <= last; fd++) close((int)fd);
 }
 
-static void reap_child(pid_t child, int abort_child) {
+static void reap_child(pid_t child, int abort_child, deadline_ms end) {
     // CGI가 출력을 닫은 후에도 끝나지 않으면 워커를 계속 점유하지 않게 한다.
-    for (int i = 0; !abort_child && i < KEEPALIVE_TIMEOUT_SEC * 100; i++) {
+    deadline_ms idle_end = deadline_after(KEEPALIVE_TIMEOUT_SEC * 1000);
+    if (idle_end < end) end = idle_end;
+    while (!abort_child && deadline_left(end)) {
         pid_t result = waitpid(child, NULL, WNOHANG);
         if (result == child || (result < 0 && errno != EINTR)) return;
         struct timespec pause = {.tv_nsec = 10000000};
@@ -81,6 +84,7 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
     }
     struct timeval tv = {.tv_sec = KEEPALIVE_TIMEOUT_SEC};
     long limit = sysconf(_SC_OPEN_MAX);
+    deadline_ms end = deadline_after(RESPONSE_TIMEOUT_MS);
     pid_t child = -1;
     if (limit > 0 && fcntl(report[1], F_SETFD, FD_CLOEXEC) == 0 &&
         setsockopt(out[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0)
@@ -112,14 +116,19 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
     int status = 500;
     if (child > 0) {
         int error;
-        ssize_t n;
-        do { n = read(report[0], &error, sizeof(error)); } while (n < 0 && errno == EINTR);
-        if (!n) status = relay_response(fd, out[0], req, 1);
+        deadline_ms exec_end = deadline_after(SOCKET_IDLE_TIMEOUT_MS);
+        if (end < exec_end) exec_end = end;
+        ssize_t n = -1;
+        while (wait_until(report[0], POLLIN, exec_end) == 0) {
+            n = read(report[0], &error, sizeof(error));
+            if (n >= 0 || errno != EINTR) break;
+        }
+        if (!n) status = response_until(fd, out[0], req, 1, end, end);
         else if (n == sizeof(error) && (error == EACCES || error == EPERM)) status = 403;
     }
     close(report[0]);
     close(out[0]);
-    if (child > 0) reap_child(child, status != 0);
+    if (child > 0) reap_child(child, status != 0, end);
     return status;
 }
 

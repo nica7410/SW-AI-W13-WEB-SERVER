@@ -27,6 +27,10 @@ void rio_readinitb(rio_t *rp, int fd) {
 static ssize_t refill(rio_t *rp, deadline_ms end) {
     if (rp->cnt == 0) {
         ssize_t count;
+        if (end) {
+            deadline_ms idle = deadline_after(SOCKET_IDLE_TIMEOUT_MS);
+            if (idle < end) end = idle;
+        }
         for (;;) {
             if (end) {
                 if (wait_until(rp->fd, POLLIN, end) < 0) return -1;
@@ -46,6 +50,15 @@ static void consume(rio_t *rp, char *dst, size_t n) {
     memcpy(dst, rp->bufp, n);
     rp->bufp += n;
     rp->cnt -= (ssize_t)n;
+}
+
+ssize_t rio_readsome_until(rio_t *rp, void *buf, size_t n, deadline_ms end) {
+    if (!deadline_left(end)) return -1;
+    ssize_t available = refill(rp, end);
+    if (available <= 0) return available;
+    if (n > (size_t)available) n = (size_t)available;
+    consume(rp, buf, n);
+    return (ssize_t)n;
 }
 
 ssize_t rio_readline_until(rio_t *rp, void *buf, size_t maxlen, deadline_ms end) {

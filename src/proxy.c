@@ -67,7 +67,7 @@ int relay_until(int clientfd, int upstreamfd, const http_request *req, const cha
         setsockopt(upstreamfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) return 502;
     if (write_request(upstreamfd, req, target, end) < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? 504 : 502;
-    return response_until(clientfd, upstreamfd, req, 0, end);
+    return response_until(clientfd, upstreamfd, req, 0, end, deadline_after(RESPONSE_TIMEOUT_MS));
 }
 
 int proxy_relay(int clientfd, int upstreamfd, const http_request *req, const char *target) {
@@ -81,6 +81,7 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
     int start = (int)(first - r->backends), error = 502;
     for (int i = 0; i < r->backend_count; i++) {
         const backend *b = &r->backends[(start + i) % r->backend_count];
+        end = effective_deadline(end);
         int left = deadline_left(end);
         if (!left) return 504;
         int share = left / (r->backend_count - i);

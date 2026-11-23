@@ -1,4 +1,5 @@
 #include "http_response.h"
+#include "deadline.h"
 #include "rio.h"
 #include "server_internal.h"
 #include <stdio.h>
@@ -35,13 +36,13 @@ int send_headers(int fd, int status, const char *content_type, size_t content_le
                      content_length, keep_alive ? "keep-alive" : "close",
                      status == 405 ? "Allow: GET, HEAD\r\n" : "");
     if (n < 0 || (size_t)n >= sizeof(headers)) return -1;
-    return rio_writen(fd, headers, (size_t)n) < 0 ? -1 : 0;
+    return send_until(fd, headers, (size_t)n, INT64_MAX);
 }
 
 int send_response(int fd, int status, const char *type, const void *body, size_t len,
                   int keep_alive) {
     if (send_headers(fd, status, type, len, keep_alive) < 0) return -1;
-    return rio_writen(fd, body, len) < 0 ? -1 : 0;
+    return send_until(fd, body, len, INT64_MAX);
 }
 
 int send_request_error(int fd, int status, int keep_alive, int head_only) {

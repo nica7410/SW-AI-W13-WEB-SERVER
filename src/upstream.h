@@ -12,6 +12,4 @@ int reverse_proxy_until(int client, const http_request *req, route *r, deadline_
 int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn *lookup);
 int relay_until(int client, int upstream, const http_request *req, const char *target,
                 deadline_ms end);
-int response_until(int client, int source, const http_request *req, int from_cgi,
-                   deadline_ms end);
 #endif
