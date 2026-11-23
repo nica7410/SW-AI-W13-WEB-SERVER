@@ -16,4 +16,4 @@
 - `test_http_request`가 이진 chunked 본문, 트레일러 뒤 다음 요청, 길이 충돌, 크기 상한, 잘못된 조각 경계를 확인했다. [파서 검사](../../../tests/test_http_request.c)
 - `test_proxy_relay`가 103의 Link 전달과 연결 전용 헤더 제거, 뒤따르는 최종 응답과 본문의 경계를 확인했다. [중계 검사](../../../tests/test_proxy_relay.c)
 - `functional.sh`가 로컬 절대 URI의 정적·CGI·Reverse 처리, 외부 Forward 제한, 자기 자신과 두 프록시 사이의 순환, 순환과 연결 거부가 섞인 경로, chunked POST의 Forward 전달을 확인했다. [기능 검사](../../../tests/functional.sh)
-- macOS에서 사용하는 POSIX CGI 분기를 Linux에서 별도로 빌드해 `test_server_edges`를 실행했다. 정상 실행, 실행 권한 거부, 파일 교체 후 403이 통과했다. 이 변경의 macOS 네이티브 실행은 아직 확인하지 못했다. [CGI 검사](../../../tests/test_server_edges.c)
+- macOS에서 사용하는 POSIX CGI 분기를 Linux에서 별도로 빌드해 `test_server_edges`를 실행했다. 정상 실행, 실행 권한 거부, 파일 교체 후 403이 통과했다. 이후 2026-11-23 커밋 `01a822e`의 macOS 러너에서도 빌드와 이 검사를 포함한 단위 테스트가 통과했다. [CGI 검사](../../../tests/test_server_edges.c) · [GitHub Actions 실행 기록](https://github.com/nica7410/SW-AI-W13-WEB-SERVER/actions/runs/45129365577)
