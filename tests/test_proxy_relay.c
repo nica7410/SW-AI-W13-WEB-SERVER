@@ -68,7 +68,9 @@ static void test_forward_post_and_chunked_response(void) {
     if (pthread_create(&thread, NULL, relay_forward_post, &relay)) exit(1);
     memset(value, 'v', sizeof(value) - 1);
     value[sizeof(value) - 1] = '\0';
-    CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+    CHECK(dprintf(origin[1], "HTTP/1.1 103 Early Hints\r\nLink: </app.js>; rel=preload\r\n"
+                             "Connection: X-Hint\r\nX-Hint: local\r\n\r\n"
+                             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                              "Via: 1.0 inner\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n"
                              "Connection: X-Local\r\nX-Local: drop\r\n"
                              "X:%s\r\n\r\n", value) > 0);
@@ -90,7 +92,11 @@ static void test_forward_post_and_chunked_response(void) {
     CHECK(separator && request_size == separator + 4 - request + (ssize_t)sizeof(post) &&
           !memcmp(separator + 4, post, sizeof(post)));
 
-    CHECK(strstr(response, "HTTP/1.1 200 OK\r\n") == response);
+    static const char hint[] = "HTTP/1.1 103 Early Hints\r\nLink: </app.js>; rel=preload\r\n"
+                               "Via: 1.1 w13-proxy\r\n\r\n";
+    CHECK(!strncmp(response, hint, sizeof(hint) - 1));
+    char *final = strstr(response, "HTTP/1.1 200 OK\r\n");
+    CHECK(final == response + sizeof(hint) - 1);
     char *date = strstr(response, "\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n");
     CHECK(date && !strstr(date + 1, "\r\nDate: "));
     CHECK(!strstr(response, "X-Local") && strstr(response, "Via: 1.0 inner\r\n") &&
@@ -99,7 +105,7 @@ static void test_forward_post_and_chunked_response(void) {
     if (field) field += strlen("\r\nX: ");
     CHECK(field && strspn(field, "v") == sizeof(value) - 1 &&
           !strncmp(field + sizeof(value) - 1, "\r\n", 2));
-    separator = strstr(response, "\r\n\r\n");
+    separator = final ? strstr(final, "\r\n\r\n") : NULL;
     CHECK(separator && response_size == separator + 4 - response + (ssize_t)sizeof(chunks) - 1 &&
           !memcmp(separator + 4, chunks, sizeof(chunks) - 1));
     close_pair(client);

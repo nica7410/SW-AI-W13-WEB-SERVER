@@ -138,6 +138,22 @@ static int write_via(int client, const char *version, deadline_ms end) {
     return write_line(client, end, "Via: ", version[7] == '0' ? "1.0 " : "1.1 ", identity);
 }
 
+static int send_informational(int client, const http_request *req, const char *line,
+                              const struct fields *fields, deadline_ms end) {
+    for (size_t i = 0; i < fields->count; i++) {
+        const char *name = fields->items[i].name;
+        if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding")) return 502;
+    }
+    if (write_line(client, end, "HTTP/1.1 ", line + 9, line[12] ? "" : " ") < 0) return -1;
+    for (size_t i = 0; i < fields->count; i++) {
+        const char *name = fields->items[i].name;
+        if (!connection_field(fields, name) &&
+            write_line(client, end, name, ": ", fields->items[i].value) < 0) return -1;
+    }
+    if (is_absolute_uri(req->uri) && write_via(client, line, end) < 0) return -1;
+    return send_until(client, "\r\n", 2, end);
+}
+
 int response_until(int clientfd, int source, const http_request *req, int from_cgi,
                    deadline_ms header_end, deadline_ms end) {
     if (end < header_end) header_end = end;
@@ -147,7 +163,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     char line[MAX_LINE + 1];
     const char *reason = "200 OK";
     int code = 200, error = from_cgi ? 500 : 502;
-    // 요청의 Expect는 앞단에서 처리했다. 원 서버의 중간 응답은 건너뛴다.
+    // A completed informational response still permits a final error if the origin fails.
     for (;;) {
         if (!from_cgi) {
             int rc = next_line(&rio, line, 0, header_end);
@@ -160,6 +176,11 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         int rc = read_fields(&rio, &fields, from_cgi, header_end);
         if (rc) return rc;
         if (code >= 200) break;
+        if (!strcmp(req->version, "HTTP/1.0")) continue;
+        if (code == 100 && get_header(req, "Expect") &&
+            (req->content_length || get_header(req, "Transfer-Encoding"))) continue;
+        rc = send_informational(clientfd, req, line, &fields, header_end);
+        if (rc) return rc;
     }
 
     time_t received = time(NULL);
