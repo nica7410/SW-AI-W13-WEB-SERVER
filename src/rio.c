@@ -1,22 +1,95 @@
-// [rio.c] Robust I/O 구현 — 네트워크 read/write는 쪼개져서 오가므로 원하는 만큼 될 때까지 반복한다
 #include "rio.h"
+#include "deadline.h"
+#include <poll.h>
+#include <sys/socket.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
 
 ssize_t rio_writen(int fd, const void *buf, size_t n) {
-    (void)fd; (void)buf; (void)n;
-    return -1; // TODO: write를 반복해 n바이트를 다 보낸다. EINTR이면 재시도
+    const char *p = buf;
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t count = write(fd, p + sent, n - sent);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -1;
+        sent += (size_t)count;
+    }
+    return (ssize_t)sent;
 }
 
 void rio_readinitb(rio_t *rp, int fd) {
-    (void)rp; (void)fd;
-    // TODO: rp->fd = fd, cnt = 0, bufp = buf
+    rp->fd = fd;
+    rp->cnt = 0;
+    rp->bufp = rp->buf;
+}
+
+static ssize_t refill(rio_t *rp, deadline_ms end) {
+    if (rp->cnt == 0) {
+        ssize_t count;
+        for (;;) {
+            if (end) {
+                if (wait_until(rp->fd, POLLIN, end) < 0) return -1;
+                count = recv(rp->fd, rp->buf, sizeof(rp->buf), MSG_DONTWAIT);
+                if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            } else count = read(rp->fd, rp->buf, sizeof(rp->buf));
+            if (count >= 0 || errno != EINTR) break;
+        }
+        if (count <= 0) return count;
+        rp->cnt = count;
+        rp->bufp = rp->buf;
+    }
+    return rp->cnt;
+}
+
+static void consume(rio_t *rp, char *dst, size_t n) {
+    memcpy(dst, rp->bufp, n);
+    rp->bufp += n;
+    rp->cnt -= (ssize_t)n;
+}
+
+ssize_t rio_readline_until(rio_t *rp, void *buf, size_t maxlen, deadline_ms end) {
+    char *out = buf;
+    size_t used = 0;
+    if (maxlen == 0) return 0;
+
+    while (used < maxlen - 1) {
+        if (end && !rp->cnt && !deadline_left(end)) return -1;   // 이미 받은 데이터는 마감과 무관
+        ssize_t available = refill(rp, end);
+        if (available < 0) return -1;
+        if (available == 0) break;
+        size_t n = maxlen - 1 - used;
+        if (n > (size_t)available) n = (size_t)available;
+        const char *newline = memchr(rp->bufp, '\n', n);
+        if (newline) n = (size_t)(newline - rp->bufp) + 1;
+        consume(rp, out + used, n);
+        used += n;
+        if (newline) break;
+    }
+    out[used] = '\0';
+    return (ssize_t)used;
 }
 
 ssize_t rio_readlineb(rio_t *rp, void *buf, size_t maxlen) {
-    (void)rp; (void)buf; (void)maxlen;
-    return -1; // TODO: 내부 버퍼에서 1바이트씩 꺼내며 '\n'을 만날 때까지 복사. 버퍼가 비면 read로 다시 채운다
+    return rio_readline_until(rp, buf, maxlen, 0);
 }
 
 ssize_t rio_readnb(rio_t *rp, void *buf, size_t n) {
-    (void)rp; (void)buf; (void)n;
-    return -1; // TODO: 내부 버퍼에 남은 것부터 꺼내고, 부족하면 read로 채우며 n바이트까지 복사
+    return rio_readn_until(rp, buf, n, 0);
+}
+
+ssize_t rio_readn_until(rio_t *rp, void *buf, size_t n, deadline_ms end) {
+    char *out = buf;
+    size_t used = 0;
+    while (used < n) {
+        if (end && !rp->cnt && !deadline_left(end)) return -1;   // 이미 받은 데이터는 마감과 무관
+        ssize_t available = refill(rp, end);
+        if (available < 0) return -1;
+        if (available == 0) break;
+        size_t take = n - used;
+        if (take > (size_t)available) take = (size_t)available;
+        consume(rp, out + used, take);
+        used += take;
+    }
+    return (ssize_t)used;
 }

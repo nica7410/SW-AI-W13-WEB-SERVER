@@ -16,7 +16,10 @@ static int test_failures = 0;
 } while (0)
 
 // 문자열 비교용
-#define CHECK_STR(actual, expected) CHECK((actual) != NULL && strcmp((actual), (expected)) == 0)
+static inline int test_strings_equal(const char *actual, const char *expected) {
+    return actual != NULL && strcmp(actual, expected) == 0;
+}
+#define CHECK_STR(actual, expected) CHECK(test_strings_equal((actual), (expected)))
 
 // main의 마지막에 return TEST_RESULT(); — 실패가 있으면 1 (make test 중단)
 #define TEST_RESULT() \
