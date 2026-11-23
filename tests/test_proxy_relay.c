@@ -112,6 +112,24 @@ static void test_forward_post_and_chunked_response(void) {
     close_pair(origin);
 }
 
+static void check_connection_content_length(int from_cgi) {
+    int client[2], source[2];
+    make_pair(client);
+    make_pair(source);
+    http_request req = {0};
+    CHECK(parse_request_line("GET / HTTP/1.1\r\n", &req) == 0);
+    CHECK(dprintf(source[1], "%sContent-Type: text/plain\r\nContent-Length: 1\r\n"
+                             "Connection: close, cOnTeNt-LeNgTh\r\n\r\nx",
+                  from_cgi ? "" : "HTTP/1.1 200 OK\r\n") > 0);
+    deadline_ms end = deadline_after(1000);
+    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) ==
+          (from_cgi ? 500 : 502));
+    char wire[2];
+    CHECK(finish_and_read(client, wire, sizeof(wire)) == 0);
+    close_pair(source);
+    close_pair(client);
+}
+
 static void test_truncated_chunk(void) {
     int client[2], origin[2];
     make_pair(client);
@@ -362,6 +380,8 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     alarm(8);
     test_forward_post_and_chunked_response();
+    check_connection_content_length(0);
+    check_connection_content_length(1);
     test_truncated_chunk();
     test_total_response_deadline();
     test_connection_failover();

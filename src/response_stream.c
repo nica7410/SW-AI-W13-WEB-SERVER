@@ -189,7 +189,8 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     for (size_t i = 0; i < fields.count; i++) {
         const char *name = fields.items[i].name, *v = fields.items[i].value;
         if (!strcasecmp(name, "Content-Length")) {
-            if (has_length || !*v || v[strspn(v, "0123456789")]) return error;
+            if (has_length || !*v || v[strspn(v, "0123456789")] ||
+                connection_field(&fields, name)) return error;
             errno = 0;
             length = strtoull(v, NULL, 10);
             if (errno) return error;
