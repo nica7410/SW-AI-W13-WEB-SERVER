@@ -7,7 +7,7 @@
 
 #define CGI_PREFIX "/cgi-bin/"   // 이 경로로 시작하는 요청을 CGI로 처리
 
-// cgi_dir 아래의 프로그램 실행. CGI는 Content-Length를 모르므로 응답 후 연결을 닫는다 (Connection: close)
+// 독립 호출은 Connection: close로 응답한다. 서버 워커는 길이를 명시한 CGI 응답 뒤 연결을 재사용할 수 있다.
 int serve_cgi(int fd, const char *cgi_dir, const http_request *req);
 // CGI client redirect destination, including an optional fragment.
 int is_cgi_redirect_uri(const char *value);

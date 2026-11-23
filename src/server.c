@@ -103,8 +103,9 @@ static int dispatch(int fd, http_request *req) {
         return reverse_proxy_request(fd, req, r);
     }
     if (!strncmp(req->path, CGI_PREFIX, strlen(CGI_PREFIX))) {
-        req->keep_alive = 0;
-        return serve_cgi_at(fd, &cgi_root, req);
+        int status = serve_cgi_at(fd, &cgi_root, req, &req->keep_alive);
+        if (status) req->keep_alive = 0;
+        return status;
     }
     return serve_static_at(fd, &static_root, req);
 }

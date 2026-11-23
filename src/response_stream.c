@@ -171,8 +171,10 @@ static int send_informational(int client, const http_request *req, const char *l
     return send_until(client, "\r\n", 2, end);
 }
 
-int response_until(int clientfd, int source, const http_request *req, int from_cgi,
+int response_until(int clientfd, int source, const http_request *req, int *cgi_keep_alive,
                    deadline_ms header_end, deadline_ms end) {
+    int from_cgi = cgi_keep_alive != NULL;
+    int keep_alive = from_cgi && *cgi_keep_alive;
     if (end < header_end) header_end = end;
     rio_t rio;
     rio_readinitb(&rio, source);
@@ -222,6 +224,8 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
                 connection_field(&fields, name)) return error;
             if (!parse_transfer_codings(v, &chunked)) return error;
             transfer_encoded = 1;
+        } else if (from_cgi && !strcasecmp(name, "Connection") && has_option(v, "close")) {
+            keep_alive = 0;
         } else if (from_cgi && !strcasecmp(name, "Status")) {
             if (has_status) return error;
             has_status = 1;
@@ -243,8 +247,10 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     if (code == 204 && (has_length || transfer_encoded)) return error;
 
     if (!deadline_left(header_end)) return stream_error(from_cgi);
+    keep_alive = keep_alive && has_length;
+    if (from_cgi) *cgi_keep_alive = keep_alive;
     if (write_line(clientfd, end, "HTTP/1.1 ", reason, reason[3] ? "" : " ") < 0 ||
-        write_line(clientfd, end, "Connection", ": ", "close") < 0) return -1;
+        write_line(clientfd, end, "Connection", ": ", keep_alive ? "keep-alive" : "close") < 0) return -1;
     int sent_date = 0;
     for (size_t i = 0; i < fields.count; i++) {
         const char *name = fields.items[i].name;
@@ -275,5 +281,6 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
 int relay_response(int clientfd, int source, const http_request *req, int from_cgi) {
     deadline_ms end = deadline_after(RESPONSE_TIMEOUT_MS);
     deadline_ms head = from_cgi ? end : deadline_after(PROXY_TIMEOUT_SEC * 1000);
-    return response_until(clientfd, source, req, from_cgi, head, end);
+    int keep_alive = 0;
+    return response_until(clientfd, source, req, from_cgi ? &keep_alive : NULL, head, end);
 }

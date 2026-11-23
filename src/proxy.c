@@ -81,7 +81,7 @@ int relay_until(int clientfd, int upstreamfd, const http_request *req, const cha
         setsockopt(upstreamfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) return 502;
     if (write_request(upstreamfd, req, target, end, reverse_peer, identity) < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? 504 : 502;
-    return response_until(clientfd, upstreamfd, req, 0, end, deadline_after(RESPONSE_TIMEOUT_MS));
+    return response_until(clientfd, upstreamfd, req, NULL, end, deadline_after(RESPONSE_TIMEOUT_MS));
 }
 
 int proxy_relay(int clientfd, int upstreamfd, const http_request *req, const char *target) {

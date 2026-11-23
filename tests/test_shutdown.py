@@ -83,13 +83,59 @@ sys.stdout.buffer.write(Path({str(Path(tmp, "body"))!r}).read_bytes())
         try:
             # Holding both ends lets the test release the CGI without blocking on open().
             with open(gate, "r+b", buffering=0) as ready, client.sock.makefile("rb") as wire:
-                client.request("GET", "/cgi-bin/stream")
+                client.request("GET", "/cgi-bin/stream", headers={"Connection": "close"})
                 assert wire.readline() == b"HTTP/1.1 200 OK\r\n"
                 headers = http.client.parse_headers(wire)
                 assert headers["Connection"] == "close" and int(headers["Content-Length"]) == len(body)
                 client.sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 ready.write(b"x")
                 assert wire.read() == body, "expected the complete final response followed by EOF"
+        finally:
+            client.close()
+            server.terminate()
+            server.wait(timeout=7)
+
+
+def test_cgi_keep_alive():
+    with tempfile.TemporaryDirectory() as tmp:
+        program = Path(tmp, "reply")
+        program.write_text(r"""#!/bin/sh
+printf 'Content-Type: text/plain\n'
+case "$QUERY_STRING" in
+    sized) printf 'Content-Length: 2\n\nok' ;;
+    empty) printf 'Content-Length: 0\n\n' ;;
+    unsized) printf '\nok' ;;
+    close) printf 'Connection: close\nContent-Length: 2\n\nok' ;;
+    short) printf 'Content-Length: 3\n\nok' ;;
+esac
+""")
+        program.chmod(0o700)
+        server, client = start_server(tmp)
+
+        def request(wire, query):
+            client.sock.sendall(f"GET /cgi-bin/reply?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+            assert wire.readline() == b"HTTP/1.1 200 OK\r\n"
+            return http.client.parse_headers(wire)
+
+        try:
+            with client.sock.makefile("rb") as wire:
+                for query, body in (("sized", b"ok"), ("empty", b"")):
+                    headers = request(wire, query)
+                    assert headers["Connection"] == "keep-alive"
+                    assert int(headers["Content-Length"]) == len(body) and wire.read(len(body)) == body
+                headers = request(wire, "unsized")
+                assert headers["Connection"] == "close" and "Content-Length" not in headers
+                assert wire.read() == b"ok"
+
+            for query, length in (("close", 2), ("short", 3)):
+                client.close()
+                client.connect()
+                with client.sock.makefile("rb") as wire:
+                    headers = request(wire, query)
+                    assert int(headers["Content-Length"]) == length
+                    if query == "close":
+                        assert headers["Connection"] == "close"
+                    assert wire.read() == b"ok", "expected the CGI output followed by EOF"
         finally:
             client.close()
             server.terminate()
@@ -154,4 +200,5 @@ for i in range(24):
 if __name__ == "__main__":
     test_startup_fd_budget()
     test_completed_cgi_close()
+    test_cgi_keep_alive()
     test_shutdown()

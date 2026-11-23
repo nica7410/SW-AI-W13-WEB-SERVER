@@ -72,7 +72,7 @@ static int numeric_address(int fd, int peer, char *host, socklen_t hostlen,
                        NI_NUMERICHOST | NI_NUMERICSERV) == 0;
 }
 
-static int run_cgi(int fd, int program, char *path, const http_request *req) {
+static int run_cgi(int fd, int program, char *path, const http_request *req, int *keep_alive) {
     char method[32], query[MAX_URI_LEN + 16], length[64], type[MAX_HEADER_VALUE + 16];
     const char *content_type = get_header(req, "Content-Type");
     snprintf(method, sizeof(method), "REQUEST_METHOD=%s", req->method);
@@ -159,7 +159,7 @@ static int run_cgi(int fd, int program, char *path, const http_request *req) {
             n = read(report[0], &error, sizeof(error));
             if (n >= 0 || errno != EINTR) break;
         }
-        if (!n) status = response_until(fd, out[0], req, 1, end, end);
+        if (!n) status = response_until(fd, out[0], req, keep_alive, end, end);
         else if (n == sizeof(error) && (error == EACCES || error == EPERM)) status = 403;
     }
     close(report[0]);
@@ -168,12 +168,12 @@ static int run_cgi(int fd, int program, char *path, const http_request *req) {
     return status;
 }
 
-int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
+int serve_open_cgi(int fd, int program, char *path, const http_request *req, int *keep_alive) {
     struct stat opened;
     if (program < 3 || fstat(program, &opened) < 0) return 500;
     if (!S_ISREG(opened.st_mode)) return 403;
 #ifdef __linux__
-    return run_cgi(fd, program, path, req);
+    return run_cgi(fd, program, path, req, keep_alive);
 #else
     // Keep a stable executable name until the interpreter has finished reopening it.
     // A hard link preserves the original file's execute permissions and filesystem.
@@ -188,7 +188,7 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
             struct stat linked;
             if (lstat(executable, &linked) == 0) {
                 if (linked.st_dev == opened.st_dev && linked.st_ino == opened.st_ino)
-                    status = run_cgi(fd, program, executable, req);
+                    status = run_cgi(fd, program, executable, req, keep_alive);
                 else status = 403;
             }
             unlink(executable);
@@ -199,7 +199,7 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
 #endif
 }
 
-int serve_cgi_at(int fd, const struct local_root *root, const http_request *req) {
+int serve_cgi_at(int fd, const struct local_root *root, const http_request *req, int *keep_alive) {
     char path[PATH_MAX];
     if (strncmp(req->path, CGI_PREFIX, strlen(CGI_PREFIX))) return 404;
     int program;
@@ -210,7 +210,7 @@ int serve_cgi_at(int fd, const struct local_root *root, const http_request *req)
 #endif
     int status = open_local_file(root, req->path + strlen(CGI_PREFIX), 0, flags, &program, path);
     if (!status) {
-        status = serve_open_cgi(fd, program, path, req);
+        status = serve_open_cgi(fd, program, path, req, keep_alive);
         close(program);
     }
     return status;
@@ -219,7 +219,8 @@ int serve_cgi_at(int fd, const struct local_root *root, const http_request *req)
 int serve_cgi(int fd, const char *cgi_dir, const http_request *req) {
     struct local_root root;
     init_local_root(&root, cgi_dir);
-    int status = serve_cgi_at(fd, &root, req);
+    int keep_alive = 0;
+    int status = serve_cgi_at(fd, &root, req, &keep_alive);
     close_local_root(&root);
     return status;
 }

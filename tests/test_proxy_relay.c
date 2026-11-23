@@ -130,7 +130,7 @@ static void check_response(int from_cgi, const char *input, int expected) {
     CHECK(rio_writen(source[1], input, strlen(input)) == (ssize_t)strlen(input));
     shutdown(source[1], SHUT_WR);
     deadline_ms end = deadline_after(1000);
-    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) ==
+    CHECK(response_until(client[0], source[0], &req, from_cgi ? &req.keep_alive : NULL, end, end) ==
           (expected >= 400 ? expected : 0));
     char wire[512];
     ssize_t n = finish_and_read(client, wire, sizeof(wire));
@@ -187,7 +187,7 @@ static void test_total_response_deadline(void) {
     pthread_t writer;
     if (pthread_create(&writer, NULL, write_finite_body, &origin[1])) exit(1);
     deadline_ms end = deadline_after(100);
-    CHECK(response_until(client[0], origin[0], &req, 0, end, end) == -1);
+    CHECK(response_until(client[0], origin[0], &req, NULL, end, end) == -1);
     char wire[512];
     finish_and_read(client, wire, sizeof(wire));
     char *body = strstr(wire, "\r\n\r\n");
