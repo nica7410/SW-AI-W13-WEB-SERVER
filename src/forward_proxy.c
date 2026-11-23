@@ -74,7 +74,7 @@ int forward_proxy_request(int clientfd, const http_request *req) {
                            target, sizeof(target)) < 0) return 400;
     int upstream = connect_until(host, port, end, getaddrinfo);
     if (upstream < 0) return errno == ETIMEDOUT ? 504 : 502;
-    int status = relay_until(clientfd, upstream, req, target, end);
+    int status = relay_until(clientfd, upstream, req, target, end, NULL);
     close(upstream);
     return status;
 }

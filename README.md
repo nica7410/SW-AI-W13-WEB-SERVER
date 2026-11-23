@@ -75,6 +75,8 @@ make clean
 
 Reverse Proxy는 `/api/` 접두사를 포함한 경로를 그대로 전달합니다. 기본 설정으로 두 백엔드를 시연하려면 각각의 정적 루트에 `api/index.html`을 만들고 서로 다른 내용을 적은 뒤 8001번과 8002번에 띄웁니다.
 
+Reverse Proxy에 직접 접속하면 백엔드는 TCP 상대 주소와 프로토콜을 받습니다. 예를 들어 로컬 HTTP 요청에는 `X-Forwarded-For: 127.0.0.1`과 `X-Forwarded-Proto: http`가 한 번씩 들어갑니다. 클라이언트가 보낸 동명 헤더는 교체하고, 상대 IP를 확인할 수 없으면 주소 헤더를 생략합니다.
+
 ```bash
 curl http://127.0.0.1:8080/api/
 curl --noproxy '' -x http://127.0.0.1:8080 http://127.0.0.1:8001/api/

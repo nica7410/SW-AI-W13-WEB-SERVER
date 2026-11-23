@@ -31,7 +31,8 @@ static int send_field(int fd, const char *name, const char *value, deadline_ms e
     return send_until(fd, line, (size_t)n, end);
 }
 
-static int write_request(int fd, const http_request *req, const char *target, deadline_ms end) {
+static int write_request(int fd, const http_request *req, const char *target, deadline_ms end,
+                         const char *reverse_peer) {
     char line[MAX_LINE + 1];
     int n = snprintf(line, sizeof(line), "%s %s %s\r\n", req->method, target, req->version);
     if (n < 0 || (size_t)n >= sizeof(line)) { errno = EINVAL; return -1; }
@@ -47,10 +48,16 @@ static int write_request(int fd, const http_request *req, const char *target, de
     }
     for (int i = 0; i < req->header_count; i++) {
         const http_header *h = &req->headers[i];
+        if (reverse_peer && (!strcasecmp(h->name, "X-Forwarded-For") ||
+                             !strcasecmp(h->name, "X-Forwarded-Proto"))) continue;
         if (!skip_header(req, h->name) && send_field(fd, h->name, h->value, end) < 0)
             return -1;
     }
     snprintf(line, sizeof(line), "%s w13-proxy", req->version + 5);
+    if (reverse_peer) {
+        if (*reverse_peer && send_field(fd, "X-Forwarded-For", reverse_peer, end) < 0) return -1;
+        if (send_field(fd, "X-Forwarded-Proto", "http", end) < 0) return -1;
+    }
     if (send_field(fd, "Via", line, end) < 0) return -1;
     if (get_header(req, "Content-Length")) {
         snprintf(line, sizeof(line), "%zu", req->content_length);
@@ -62,17 +69,26 @@ static int write_request(int fd, const http_request *req, const char *target, de
 }
 
 int relay_until(int clientfd, int upstreamfd, const http_request *req, const char *target,
-                deadline_ms end) {
+                deadline_ms end, const char *reverse_peer) {
     struct timeval tv = {.tv_sec = PROXY_TIMEOUT_SEC};
     if (setsockopt(upstreamfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
         setsockopt(upstreamfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) return 502;
-    if (write_request(upstreamfd, req, target, end) < 0)
+    if (write_request(upstreamfd, req, target, end, reverse_peer) < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? 504 : 502;
     return response_until(clientfd, upstreamfd, req, 0, end, deadline_after(RESPONSE_TIMEOUT_MS));
 }
 
 int proxy_relay(int clientfd, int upstreamfd, const http_request *req, const char *target) {
-    return relay_until(clientfd, upstreamfd, req, target, deadline_after(PROXY_TIMEOUT_SEC * 1000));
+    return relay_until(clientfd, upstreamfd, req, target, deadline_after(PROXY_TIMEOUT_SEC * 1000), NULL);
+}
+
+static const char *peer_ip(int fd, char ip[NI_MAXHOST]) {
+    struct sockaddr_storage peer;
+    socklen_t len = sizeof(peer);
+    if (getpeername(fd, (struct sockaddr *)&peer, &len) < 0 ||
+        (peer.ss_family != AF_INET && peer.ss_family != AF_INET6)) return "";
+    int rc = getnameinfo((struct sockaddr *)&peer, len, ip, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+    return rc == 0 ? ip : "";
 }
 
 int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadline_ms end,
@@ -105,7 +121,8 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         }
         // 연결 전 실패만 재시도한다. 이미 전달한 POST가 두 번 실행될 수 있다.
         access_connected(b);
-        int status = relay_until(clientfd, upstream, req, req->uri, end);
+        char ip[NI_MAXHOST];
+        int status = relay_until(clientfd, upstream, req, req->uri, end, peer_ip(clientfd, ip));
         close(upstream);
         return status;
     }

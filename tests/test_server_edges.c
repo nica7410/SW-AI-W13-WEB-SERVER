@@ -1,9 +1,8 @@
 #include "test.h"
-#include "net.h"
+#include "tcp_pair.h"
 #include "http_response.h"
 #include "server.h"
 #include "server_internal.h"
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -11,10 +10,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-static void require(int ok, const char *what) {
-    if (!ok) { perror(what); exit(1); }
-}
 
 static void write_file(const char *name, const char *text, mode_t mode) {
     int fd = open(name, O_WRONLY | O_CREAT | O_TRUNC, mode);
@@ -123,22 +118,6 @@ static void test_cgi_adder(void) {
     CHECK(serve_cgi_at(pair[0], &root, &req) == 0);
     check_reply(pair, "HTTP/1.1 200 OK\r\n", "42\n");
     close_local_root(&root);
-}
-
-static void tcp_pair(int pair[2]) {
-    int listener = open_listenfd("0");
-    require(listener >= 0, "open_listenfd");
-    struct sockaddr_in addr = {0};
-    socklen_t n = sizeof(addr);
-    require(getsockname(listener, (struct sockaddr *)&addr, &n) == 0, "getsockname");
-    CHECK(n == sizeof(addr) && addr.sin_family == AF_INET);
-    CHECK(addr.sin_addr.s_addr == htonl(INADDR_ANY) && addr.sin_port != 0);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    pair[1] = socket(AF_INET, SOCK_STREAM, 0);
-    require(pair[1] >= 0 && connect(pair[1], (struct sockaddr *)&addr, sizeof(addr)) == 0, "connect");
-    pair[0] = accept(listener, NULL, NULL);
-    require(pair[0] >= 0, "accept");
-    close(listener);
 }
 
 static void *handle(void *arg) {

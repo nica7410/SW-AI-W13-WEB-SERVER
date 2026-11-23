@@ -1,4 +1,5 @@
 #include "test.h"
+#include "tcp_pair.h"
 #include "proxy.h"
 #include "response_stream.h"
 #include "upstream.h"
@@ -82,6 +83,7 @@ static void test_forward_post_and_chunked_response(void) {
     ssize_t request_size = finish_and_read(origin, request, sizeof(request));
     CHECK(strstr(request, "POST /x?q HTTP/1.1\r\nHost: origin:81\r\n") == request);
     CHECK(strstr(request, "X-Local") == NULL && strstr(request, "old-host") == NULL);
+    CHECK(!strstr(request, "X-Forwarded-"));
     CHECK(strstr(request, "Via: 1.0 previous\r\n") && strstr(request, "Via: 1.1 w13-proxy\r\n"));
     CHECK(strstr(request, "Content-Length: 3\r\n") && strstr(request, "Connection: close\r\n"));
     char *separator = strstr(request, "\r\n\r\n");
@@ -174,7 +176,7 @@ static int connect_candidate(const char *host, const char *port, deadline_ms end
 
 static void test_connection_failover(void) {
     int client[2], origin[2];
-    make_pair(client);
+    tcp_pair(client);
     make_pair(origin);
     healthy_fd = origin[0];
     route r;
@@ -182,6 +184,9 @@ static void test_connection_failover(void) {
     http_request req = {0};
     CHECK(parse_request_line("POST /api/ HTTP/1.1\r\n", &req) == 0);
     CHECK(parse_header_line("Content-Length: 1\r\n", &req) == 0);
+    CHECK(parse_header_line("x-forwarded-FOR: untrusted-ip\r\n", &req) == 0);
+    CHECK(parse_header_line("X-Forwarded-For: untrusted-duplicate\r\n", &req) == 0);
+    CHECK(parse_header_line("X-Forwarded-Proto: untrusted-proto\r\n", &req) == 0);
     req.body = "x";
     CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") > 0);
     request_end = deadline_after(1000);
@@ -193,6 +198,11 @@ static void test_connection_failover(void) {
     ssize_t n = rio_readnb(&rio, wire, sizeof(wire) - 1);
     wire[n > 0 ? n : 0] = '\0';
     CHECK(strstr(wire, "POST /api/ ") == wire && !strstr(wire + 1, "POST "));
+    const char *ip = strstr(wire, "\r\nX-Forwarded-For: 127.0.0.1\r\n");
+    const char *proto = strstr(wire, "\r\nX-Forwarded-Proto: http\r\n");
+    CHECK(ip && !strstr(ip + 2, "\r\nX-Forwarded-For: "));
+    CHECK(proto && !strstr(proto + 2, "\r\nX-Forwarded-Proto: "));
+    CHECK(!strstr(wire, "untrusted"));
     CHECK(strstr(wire, "\r\n\r\nx") != NULL);
     finish_and_read(client, wire, sizeof(wire));
     CHECK(strstr(wire, "HTTP/1.1 200 OK") == wire && strstr(wire, "\r\n\r\nok"));
@@ -276,14 +286,14 @@ static void test_deadline(void) {
     make_pair(origin);
     http_request req = {0};
     CHECK(parse_request_line("GET / HTTP/1.1\r\n", &req) == 0);
-    CHECK(relay_until(client[0], origin[0], &req, "/", end) == 504);
+    CHECK(relay_until(client[0], origin[0], &req, "/", end, NULL) == 504);
     char byte;
     CHECK(recv(origin[1], &byte, 1, MSG_DONTWAIT) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
 
     // A partial status line must obey the remaining header deadline on the next refill.
     CHECK(rio_writen(origin[1], "HTTP/1.", 7) == 7);
     deadline_ms header_end = deadline_after(80);
-    CHECK(relay_until(client[0], origin[0], &req, "/", header_end) == 504);
+    CHECK(relay_until(client[0], origin[0], &req, "/", header_end, NULL) == 504);
     CHECK(deadline_after(0) < header_end + 1000);
     close_pair(client);
     close_pair(origin);

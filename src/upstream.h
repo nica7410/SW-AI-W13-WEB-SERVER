@@ -11,6 +11,7 @@ connect_fn connect_for_route;
 int reverse_proxy_until(int client, const http_request *req, route *r, deadline_ms end,
                         connect_fn *connect_backend);
 int connect_until(const char *host, const char *port, deadline_ms end, lookup_fn *lookup);
+// reverse_peer is NULL on forward requests and empty when the reverse peer IP is unavailable.
 int relay_until(int client, int upstream, const http_request *req, const char *target,
-                deadline_ms end);
+                deadline_ms end, const char *reverse_peer);
 #endif
