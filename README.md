@@ -108,6 +108,8 @@ curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
 
 부하 스크립트는 `ab`(없으면 `wrk`)를 사용합니다. `URL`, `CONCURRENCY`(공백으로 구분한 목록), `REQUESTS`, `KEEPALIVE=1`로 조건을 바꿉니다.
 
+`ab` 요약의 `failed`는 연결·읽기·응답 길이 등의 실패 수이고, `non_2xx`는 HTTP 상태가 2xx 범위 밖인 응답 수입니다. 503 응답의 길이까지 달라지면 같은 요청이 두 지표에 모두 포함됩니다. 도구 실행이 실패하거나 필수 지표가 누락되면 스크립트는 오류로 종료합니다.
+
 ```bash
 URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 32 64 100 256" bash tests/load.sh
 URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 9 32 64 100 256" KEEPALIVE=1 bash tests/load.sh
