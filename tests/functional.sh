@@ -187,13 +187,20 @@ expect "$(fetch -o /dev/null -w '%{http_code}' "$base/api/")" 502 unavailable
 start "$b" -r "$tmp/b"
 expect "$(fetch -f "$base/api/")" b recovery-after-refusal
 access_line() {
-    grep -Fxq "access $2" "$tmp/$1.log" || { echo "missing access log: $2" >&2; exit 1; }
+    awk -v prefix="access $2 duration_ms=" -v min_ms="${3:-0}" '
+        index($0, prefix) == 1 {
+            ms = substr($0, length(prefix) + 1)
+            if (ms ~ /^[0-9]+$/ && ms + 0 >= min_ms) found = 1
+        }
+        END { exit !found }
+    ' "$tmp/$1.log" || { echo "missing access log: $2 (minimum ${3:-0} ms)" >&2; exit 1; }
 }
 rr='event=request method=GET path=/api/ status=200 outcome=complete'
 for peer in "$a" "$b"; do
     access_line "$port" "$rr first=127.0.0.1:$peer connected=127.0.0.1:$peer attempts=1"
 done
 access_line "$port" "$rr first=127.0.0.1:$a connected=127.0.0.1:$b attempts=2"
+access_line "$port" "event=request method=GET path=/slow/ status=504 outcome=complete first=127.0.0.1:$slow connected=127.0.0.1:$slow attempts=1" 4000
 access_line "$port" 'event=request method=GET path=/short status=200 outcome=aborted first=- connected=- attempts=0'
 access_line "$full" 'event=overload method=- path=- status=503 outcome=complete first=- connected=- attempts=0'
 if grep -q 'private-marker' "$tmp/$port.log" || grep -q '^access ' "$tmp/$a.log"; then
