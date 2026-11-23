@@ -4,7 +4,7 @@
 
 **반영 결과**
 
-일반 단위 검사 다음에 기능 검사와 종료 검사를 별도 단계로 추가했다. 두 스크립트는 로컬 Linux 컨테이너에서 통과했다. GitHub Actions 러너 결과는 다음 push 또는 PR에서 확인할 수 있다.
+일반 단위 검사 다음에 기능 검사와 종료 검사를 별도 단계로 추가했다. 두 스크립트는 로컬 Linux 컨테이너와 `fb656d0`의 GitHub Actions Ubuntu 러너에서 모두 통과했다. [원격 실행 기록](https://github.com/nica7410/SW-AI-W13-WEB-SERVER/actions/runs/45123268839)
 
 현재 CI는 일반 빌드와 단위 테스트, ASan·UBSan 빌드와 단위 테스트를 실행한다. 라운드로빈, 장애 전환, 과부하 시 503 전달은 실제 서버를 띄우는 기능 스크립트에 있다. SIGTERM 유예 시간과 CGI 자식 회수는 별도 Python 검사에서 다룬다. [현재 CI](../../../.github/workflows/ci.yml) · [기능 검사](../../../tests/functional.sh) · [종료 검사](../../../tests/test_shutdown.py)
 

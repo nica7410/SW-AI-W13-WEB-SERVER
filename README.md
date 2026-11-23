@@ -6,19 +6,15 @@ POSIX 소켓 API만으로 처음부터 만든 C 웹서버 + Forward / Reverse Pr
 
 ## 설계
 
-| 항목 | 선택 | 이유 |
+| 요구사항 | 구현과 설계 선택 | 검증 근거 |
 |---|---|---|
-| 동시성 | 스레드 풀 (`pthread`, 생산자-소비자 큐) | 스레드 생성 비용 없음, 워커 수로 동시 처리량 제한, 공유 상태(Round-Robin 카운터) 사용 쉬움 |
-| keep-alive 공정성 | 큐에 기다리는 연결이 있으면 유휴 연결을 양보 | 워커 하나가 유휴 연결 하나를 붙잡는 스레드 풀의 약점을 보완 (아래 "처리 범위" 참고) |
-| 프록시 | **Reverse + Forward** | Reverse: 경로 prefix 라우팅 + Round-Robin + 502/504. Forward: 절대 URI 요청을 원 서버로 중계 (`-f`로 켤 때만) |
-| 동적 처리 | CGI (`fork` + `execve`) | 서버와 분리된 프로그램 실행, CSAPP Tiny와 같은 방식 |
-| 반환 규칙 | `0` 성공 · 양수 = 보낼 HTTP 오류 코드 · `-1` 연결 종료 | 오류 응답을 `handle_connection` 한 곳에서만 보냄 |
-| 헤더 저장 | 고정 배열 32개 | malloc/free 없음, 상한 초과 시 바로 431 |
-| 크기 상한 | URI 2047바이트까지 허용(2048바이트부터 414) · 헤더 줄 8KB · 헤더 32개(431) · 헤더 값 1KB(431) · 본문 1MB(413) | 저장 배열 2048바이트에 문자열 종료 문자가 포함됨 |
-| 시간 제한 | 다음 요청 대기 5초 · 헤더 전체 5초 · 본문 전체 5초(넘으면 408) · 프록시 응답 헤더까지 5초 | 느린 클라이언트(slowloris)가 워커를 오래 붙잡지 못하게 함 |
-| 과부하 | 큐가 가득 차면 503을 보낸 뒤 클라이언트가 닫을 때까지 기다렸다 close. 큐 크기는 열린 파일 한도에 맞춰 자동 조정 | 503 응답이 RST에 잘리지 않고, fd가 모자라 accept가 실패하는 일이 없음 |
-| HTTP 범위 | GET · POST · HEAD (그 외 501), HTTP/1.0·1.1, keep-alive, chunked 요청 미지원 | |
-| 설정 | CLI 인자 + `conf/routes.conf` | |
+| TCP 수락과 동시 처리 | [수락 루프](src/server.c)가 연결을 [고정 크기 워커 풀](src/threadpool.c)에 넘깁니다. 새 연결이 기다리면 유휴 keep-alive 연결이 워커를 양보하고, 대기 큐까지 차면 새 연결에 503을 보냅니다. | [유휴 연결 양보·큐 초과 503](tests/functional.sh) |
+| HTTP 파싱과 응답 | [파서](src/http_request.c)는 헤더의 끝을 읽은 뒤 Content-Length만큼 본문을 받습니다. [응답 작성기](src/http_response.c)는 상태와 본문 길이를 보냅니다. | [경계·시간 초과·연결 재사용](tests/test_http_request.c) |
+| 정적 파일과 CGI | [정적 핸들러](src/static_file.c)는 루트 안의 파일을 제공하고, [CGI 핸들러](src/cgi.c)는 별도 프로세스의 출력을 중계합니다. | [루트 경계·CGI 응답](tests/test_server_edges.c) |
+| Forward·Reverse Proxy | [Forward](src/forward_proxy.c)는 클라이언트를 대신해 원 서버에 접속합니다. [Reverse](src/proxy.c)는 서비스 앞에서 경로에 맞는 백엔드를 고르고 연결 실패 시 다음 후보를 시도합니다. Forward 캐싱은 과제의 선택 항목입니다. | [프록시 중계·장애 전환](tests/test_proxy_relay.c) |
+| 종료와 자원 회수 | [서버](src/server.c)가 새 연결 수락을 멈춥니다. 유예가 끝나 CGI를 중단하면 같은 그룹에 종료 신호를 보내고 직접 실행한 자식을 회수합니다. | [SIGTERM과 하위 프로세스 정리](tests/test_shutdown.py) |
+
+요청 크기와 시간 상한, 지원 메서드는 아래에 정리했습니다. [처리 범위와 한계](#처리-범위와-한계)
 
 ## 요청 처리 흐름
 
@@ -111,6 +107,8 @@ access event=overload method=- path=- status=503 outcome=complete first=- connec
 
 ## 검증
 
+Ubuntu에서는 `fb656d0`의 빌드, 단위 검사, HTTP·프록시 기능 검사, 종료 검사, sanitizer 검사가 통과했습니다. macOS에서는 `a606e86`의 일반 빌드와 단위 검사가 통과했습니다. [Ubuntu CI 실행 기록](https://github.com/nica7410/SW-AI-W13-WEB-SERVER/actions/runs/45123268839) · [macOS CI 실행 기록](https://github.com/nica7410/SW-AI-W13-WEB-SERVER/actions/runs/45125742774)
+
 | 명령 | 확인하는 동작 |
 |---|---|
 | `make test` | HTTP 요청 라인·헤더·크기 상한·헤더/본문 마감(408), MIME 매핑, 절대 URI, 최장 접두사·Round-Robin, 프록시 중계·마감, 파일 경계·CGI·TCP 오류 응답, 스레드 풀 대기 판단 |
@@ -198,6 +196,8 @@ URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 9 32 64 100 256" KEEPALIVE
 
 ## 처리 범위와 한계
 
+- HTTP/1.0·1.1에서 GET·POST·HEAD를 처리하며 그 외 메서드에는 501을 반환합니다. URI는 2047바이트까지 허용하고 초과하면 414를 보냅니다. 헤더는 고정 배열에 최대 32개, 한 줄 8KB, 값 버퍼 1KB로 제한하며 상한을 넘기면 431입니다. 본문 상한은 1MB(413)입니다.
+- 핸들러는 성공 시 0, 오류 응답이 필요하면 HTTP 상태 코드, 전송 중 연결을 닫아야 하면 -1을 반환합니다. 워커가 반환값을 보고 오류 응답을 보냅니다.
 - 정적 파일은 GET·HEAD로 제공하고 POST에는 405를 보냅니다. CGI와 프록시는 POST 본문을 바이트 단위로 전달합니다.
 - 정적 응답은 연결을 재사용할 수 있습니다. CGI와 프록시 응답은 `Connection: close`로 끝납니다.
 - **과부하:** 연결 대기 큐(기본 1024)가 가득 차면 accept 스레드가 503을 보내고 송신만 닫은 뒤, 클라이언트가 닫을 때까지(최대 1초) 입력을 버리다가 close합니다. 이렇게 기다리는 연결이 64개면 accept를 잠시 멈추고 새 연결을 커널 listen backlog에 둡니다. 시작할 때 `워커 × 8 + 96 + 큐 크기`만큼의 열린 파일 한도를 확보하고, hard 한도 때문에 안 되면 큐를 줄입니다.
