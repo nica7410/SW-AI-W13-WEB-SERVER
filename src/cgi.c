@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -58,11 +59,7 @@ static void reap_child(pid_t child, int owns_group, int abort_child, deadline_ms
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
 }
 
-int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
-    struct stat st;
-    if (program < 3 || fstat(program, &st) < 0) return 500;
-    if (!S_ISREG(st.st_mode)) return 403;
-
+static int run_cgi(int fd, int program, char *path, const http_request *req) {
     char method[32], query[MAX_URI_LEN + 16], length[64], type[MAX_HEADER_VALUE + 16];
     const char *content_type = get_header(req, "Content-Type");
     snprintf(method, sizeof(method), "REQUEST_METHOD=%s", req->method);
@@ -134,6 +131,37 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
     close(out[0]);
     if (child > 0) reap_child(child, owns_group, status != 0, end);
     return status;
+}
+
+int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
+    struct stat opened;
+    if (program < 3 || fstat(program, &opened) < 0) return 500;
+    if (!S_ISREG(opened.st_mode)) return 403;
+#ifdef __linux__
+    return run_cgi(fd, program, path, req);
+#else
+    // Keep a stable executable name until the interpreter has finished reopening it.
+    // A hard link preserves the original file's execute permissions and filesystem.
+    const char *tmp = getenv("TMPDIR");
+    char dir[PATH_MAX], executable[PATH_MAX];
+    int n = snprintf(dir, sizeof(dir), "%s/w13-cgi-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    if (n < 0 || (size_t)n >= sizeof(dir) || !mkdtemp(dir)) return 500;
+    int status = 500;
+    n = snprintf(executable, sizeof(executable), "%s/program", dir);
+    if (n >= 0 && (size_t)n < sizeof(executable)) {
+        if (linkat(AT_FDCWD, path, AT_FDCWD, executable, 0) == 0) {
+            struct stat linked;
+            if (lstat(executable, &linked) == 0) {
+                if (linked.st_dev == opened.st_dev && linked.st_ino == opened.st_ino)
+                    status = run_cgi(fd, program, executable, req);
+                else status = 403;
+            }
+            unlink(executable);
+        } else status = file_error_status(errno);
+    }
+    rmdir(dir);
+    return status;
+#endif
 }
 
 int serve_cgi_at(int fd, const struct local_root *root, const http_request *req) {

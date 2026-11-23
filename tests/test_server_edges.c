@@ -108,18 +108,20 @@ static void test_root_and_file_identity(void) {
     require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
     CHECK(serve_cgi_at(pair[0], &root, &req) == 0);
     check_reply(pair, "HTTP/1.1 400 \r\n", "first");
-#ifdef __linux__
     int program;
     require(open_local_file(&root, "run-link", 0, O_RDONLY, &program, path) == 0, "pin CGI");
     write_file("root/replacement", "not an executable\n", 0600);
     require(rename("root/replacement", "root/run") == 0, "replace CGI");
     require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "socketpair");
+#ifdef __linux__
     CHECK(serve_open_cgi(pair[0], program, path, &req) == 0);
-    close(program);
     check_reply(pair, "HTTP/1.1 400 \r\n", "first");
 #else
-    require(chmod("root/run", 0600) == 0, "chmod");
+    CHECK(serve_open_cgi(pair[0], program, path, &req) == 403);
+    close(pair[0]);
+    close(pair[1]);
 #endif
+    close(program);
     CHECK(serve_cgi_at(-1, &root, &req) == 403);
 
     close_local_root(&root);
