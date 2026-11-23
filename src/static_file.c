@@ -1,13 +1,46 @@
-// [static_file.c] 정적 파일 서빙 구현
 #include "static_file.h"
+#include "server_internal.h"
+#include "http_response.h"
+#include "local_path.h"
+#include "mime.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+int serve_static_at(int fd, const struct local_root *root, const http_request *req) {
+    if (!strcmp(req->method, "POST")) return 405;
+    char path[PATH_MAX];
+    int file;
+    int status = open_local_file(root, req->path, 1, O_RDONLY | O_NONBLOCK, &file, path);
+    if (status) return status;
+    struct stat st;
+    if (fstat(file, &st) < 0) status = 500;
+    else if (!S_ISREG(st.st_mode)) status = 403;
+    else if (st.st_size < 0 || (uintmax_t)st.st_size > SIZE_MAX) status = 500;
+    else {
+        size_t remaining = (size_t)st.st_size;
+        status = send_headers(fd, 200, mime_type(path), remaining, req->keep_alive);
+        if (!strcmp(req->method, "HEAD")) remaining = 0;
+        char buf[RIO_BUFSIZE];
+        while (!status && remaining) {
+            size_t take = remaining < sizeof(buf) ? remaining : sizeof(buf);
+            ssize_t n = read(file, buf, take);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0 || rio_writen(fd, buf, (size_t)n) < 0) status = -1;
+            else remaining -= (size_t)n;
+        }
+    }
+    close(file);
+    return status;
+}
 
 int serve_static(int fd, const char *root, const http_request *req) {
-    (void)fd; (void)root; (void)req;
-    // TODO:
-    //  1. 경로 만들기: root + path ("/"로 끝나면 index.html 붙임)
-    //  2. realpath 결과가 root 밖이면 403 ("../" 디렉터리 탈출 차단)
-    //  3. stat: 없으면 404, 일반 파일이 아니거나 읽기 권한 없으면 403
-    //  4. send_headers(200, mime_type(path), 파일 크기, keep_alive)
-    //  5. GET이면 파일을 open → read → rio_writen 반복 (큰 파일도 메모리에 다 올리지 않음) → close
-    return 404;
+    struct local_root dir;
+    init_local_root(&dir, root);
+    int status = serve_static_at(fd, &dir, req);
+    close_local_root(&dir);
+    return status;
 }
