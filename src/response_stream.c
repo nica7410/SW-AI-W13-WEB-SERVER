@@ -1,4 +1,5 @@
 #include "response_stream.h"
+#include "proxy_identity.h"
 #include "access_log.h"
 #include "forward_proxy.h"
 #include "proxy.h"
@@ -204,6 +205,12 @@ static int status_code(const char *text) {
     return (text[0] - '0') * 100 + (text[1] - '0') * 10 + text[2] - '0';
 }
 
+static int write_via(int client, const char *version, deadline_ms end) {
+    char identity[ENDPOINT_SIZE] = "w13-proxy";
+    proxy_endpoint(client, 0, identity);
+    return write_line(client, end, "Via: ", version[7] == '0' ? "1.0 " : "1.1 ", identity);
+}
+
 int response_until(int clientfd, int source, const http_request *req, int from_cgi,
                    deadline_ms header_end, deadline_ms end) {
     if (end < header_end) header_end = end;
@@ -269,8 +276,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     char date[HTTP_DATE_SIZE];
     if (!sent_date && received != (time_t)-1 && format_http_date(received, date) &&
         write_line(clientfd, end, "Date: ", date, "") < 0) return -1;
-    if (!from_cgi && is_absolute_uri(req->uri) &&
-        write_line(clientfd, end, "Via: ", line[7] == '0' ? "1.0" : "1.1", " w13-proxy") < 0) return -1;
+    if (!from_cgi && is_absolute_uri(req->uri) && write_via(clientfd, line, end) < 0) return -1;
     if (send_until(clientfd, "\r\n", 2, end) < 0) return -1;
     access_headers_sent(code);
     if (!strcmp(req->method, "HEAD") || code == 204 || code == 304) return 0;

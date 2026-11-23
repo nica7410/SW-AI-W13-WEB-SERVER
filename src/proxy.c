@@ -1,4 +1,5 @@
 #include "proxy.h"
+#include "proxy_identity.h"
 #include "access_log.h"
 #include "upstream.h"
 #include "forward_proxy.h"
@@ -32,7 +33,7 @@ static int send_field(int fd, const char *name, const char *value, deadline_ms e
 }
 
 static int write_request(int fd, const http_request *req, const char *target, deadline_ms end,
-                         const char *reverse_peer) {
+                         const char *reverse_peer, const char *identity) {
     char line[MAX_LINE + 1];
     int n = snprintf(line, sizeof(line), "%s %s %s\r\n", req->method, target, req->version);
     if (n < 0 || (size_t)n >= sizeof(line)) { errno = EINVAL; return -1; }
@@ -53,7 +54,7 @@ static int write_request(int fd, const http_request *req, const char *target, de
         if (!skip_header(req, h->name) && send_field(fd, h->name, h->value, end) < 0)
             return -1;
     }
-    snprintf(line, sizeof(line), "%s w13-proxy", req->version + 5);
+    snprintf(line, sizeof(line), "%s %s", req->version + 5, identity);
     if (reverse_peer) {
         if (*reverse_peer && send_field(fd, "X-Forwarded-For", reverse_peer, end) < 0) return -1;
         if (send_field(fd, "X-Forwarded-Proto", "http", end) < 0) return -1;
@@ -70,10 +71,13 @@ static int write_request(int fd, const http_request *req, const char *target, de
 
 int relay_until(int clientfd, int upstreamfd, const http_request *req, const char *target,
                 deadline_ms end, const char *reverse_peer) {
+    if (proxy_returns_to_hop(clientfd, upstreamfd, req)) return 508;
+    char identity[ENDPOINT_SIZE] = "w13-proxy";
+    proxy_endpoint(clientfd, 0, identity);
     struct timeval tv = {.tv_sec = PROXY_TIMEOUT_SEC};
     if (setsockopt(upstreamfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
         setsockopt(upstreamfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) return 502;
-    if (write_request(upstreamfd, req, target, end, reverse_peer) < 0)
+    if (write_request(upstreamfd, req, target, end, reverse_peer, identity) < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? 504 : 502;
     return response_until(clientfd, upstreamfd, req, 0, end, deadline_after(RESPONSE_TIMEOUT_MS));
 }
@@ -93,8 +97,9 @@ static const char *peer_ip(int fd, char ip[NI_MAXHOST]) {
 
 int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadline_ms end,
                         connect_fn *connect_backend) {
+    if (via_revisits_listener(clientfd, req)) return 508;
     unsigned tried = 0;
-    int error = 502;
+    int error = 0, loop_seen = 0;
     backend_attempt attempt = {0};
     while (deadline_left(end) && select_backend(r, tried, deadline_after(0), &attempt)) {
         const backend *b = &r->backends[attempt.index];
@@ -104,6 +109,11 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         if (!left) {
             finish_backend(r, &attempt, 0, 0, deadline_after(0));
             return 504;
+        }
+        if (is_listener_authority(clientfd, b->host, b->port, NULL)) {
+            finish_backend(r, &attempt, 0, 0, deadline_after(0));
+            loop_seen = 1;
+            continue;
         }
         int share = left / attempt.eligible;
         deadline_ms attempt_end = end - left + (share ? share : 1);
@@ -116,6 +126,7 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         finish_backend(r, &attempt, upstream >= 0, backend_failure, deadline_after(0));
         if (upstream < 0) {
             if (connect_error == ETIMEDOUT) error = 504;
+            else if (!error) error = 502;
             if (!deadline_left(end)) return 504;
             continue;
         }
@@ -124,9 +135,15 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         char ip[NI_MAXHOST];
         int status = relay_until(clientfd, upstream, req, req->uri, end, peer_ip(clientfd, ip));
         close(upstream);
+        if (status == 508) {
+            loop_seen = 1;
+            continue;   // relay_until detected a loop before writing any request bytes
+        }
         return status;
     }
-    return deadline_left(end) ? error : 504;
+    if (!deadline_left(end)) return 504;
+    if (error) return error;
+    return loop_seen ? 508 : 502;
 }
 
 int reverse_proxy_request(int clientfd, const http_request *req, route *r) {

@@ -1,4 +1,5 @@
 #include "forward_proxy.h"
+#include "proxy_identity.h"
 #include "upstream.h"
 #include "proxy_internal.h"
 #include "net.h"
@@ -72,6 +73,7 @@ int forward_proxy_request(int clientfd, const http_request *req) {
     char host[256], port[8], target[MAX_URI_LEN];
     if (parse_absolute_uri(req->uri, host, sizeof(host), port, sizeof(port),
                            target, sizeof(target)) < 0) return 400;
+    if (via_revisits_listener(clientfd, req)) return 508;
     int upstream = connect_until(host, port, end, getaddrinfo);
     if (upstream < 0) return errno == ETIMEDOUT ? 504 : 502;
     int status = relay_until(clientfd, upstream, req, target, end, NULL);

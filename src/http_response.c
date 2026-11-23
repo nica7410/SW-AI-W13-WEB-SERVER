@@ -36,6 +36,7 @@ const char *status_text(int status) {
     case 502: return "Bad Gateway";
     case 503: return "Service Unavailable";
     case 504: return "Gateway Timeout";
+    case 508: return "Loop Detected";
     case 505: return "HTTP Version Not Supported";
     default: return "Unknown";
     }

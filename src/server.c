@@ -7,6 +7,8 @@
 #include "http_response.h"
 #include "net.h"
 #include "proxy.h"
+#include "proxy_identity.h"
+#include <strings.h>
 #include "static_file.h"
 #include "threadpool.h"
 #include <errno.h>
@@ -69,8 +71,25 @@ void request_stop(void) {
 
 static int dispatch(int fd, http_request *req) {
     if (is_absolute_uri(req->uri)) {
-        req->keep_alive = 0;
-        return g_cfg->forward_enabled ? forward_proxy_request(fd, req) : 403;
+        char host[256], port[8], target[MAX_URI_LEN];
+        if (parse_absolute_uri(req->uri, host, sizeof(host), port, sizeof(port),
+                               target, sizeof(target)) < 0) return 400;
+        if (!is_listener_authority(fd, host, port, g_cfg->server_name)) {
+            req->keep_alive = 0;
+            return g_cfg->forward_enabled ? forward_proxy_request(fd, req) : 403;
+        }
+        // Local dispatch and reverse forwarding use origin-form and the URI's authority.
+        int i = 0;
+        while (i < req->header_count && strcasecmp(req->headers[i].name, "Host")) i++;
+        size_t len = strcspn(req->uri + 7, "/?");
+        if (i == MAX_HEADERS || len >= MAX_HEADER_VALUE) return 431;
+        if (i == req->header_count) {
+            strcpy(req->headers[i].name, "Host");
+            req->header_count++;
+        }
+        memcpy(req->headers[i].value, req->uri + 7, len);
+        req->headers[i].value[len] = '\0';
+        strcpy(req->uri, target);
     }
     route *r = match_route(&g_routes, req->path);
     if (r) {

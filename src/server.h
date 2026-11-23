@@ -9,6 +9,7 @@ typedef struct {
     const char *root;          // -r  정적 파일 루트 (기본 "./www")
     const char *cgi_dir;       // -g  CGI 프로그램 폴더 (기본 "./cgi-bin")
     const char *routes_path;   // -c  Reverse Proxy 설정 파일. NULL이면 Reverse Proxy 사용 안 함
+    const char *server_name;       // 절대 URI로 접근할 때 사용할 추가 호스트 이름
     int forward_enabled;       // -f  Forward Proxy 허용 (기본 0 — 아무나 쓰는 열린 프록시가 되지 않도록 명시적으로 켬)
     int threads;               // -t  워커 스레드 수 (기본 8)
     int queue_size;            // -q  연결 대기 큐 크기 (기본 1024). 큐는 fd만 담으므로 크게 잡아도 부담이 작다

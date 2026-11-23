@@ -50,7 +50,10 @@ for dir in a b; do
     echo "$dir" >"$tmp/$dir/api/index.html"
 done
 printf '/api/ 127.0.0.1:%s 127.0.0.1:%s\n/slow/ 127.0.0.1:%s\n' "$a" "$b" "$slow" >"$tmp/routes"
-start "$a" -r "$tmp/a"
+printf '/cycle/ 127.0.0.1:%s\n' "$port" >"$tmp/routes-a"
+printf '/cycle/ 127.0.0.1:%s\n/self/ localhost:%s\n' "$a" "$port" >>"$tmp/routes"
+printf '/mixed/ localhost:%s 127.0.0.1:%s\n' "$port" "$slow" >>"$tmp/routes"
+start "$a" -r "$tmp/a" -c "$tmp/routes-a" -n a.example
 start "$b" -r "$tmp/b"
 start "$port" -r ./www -c "$tmp/routes" -f -v
 start "$fair" -r ./www -t 1
@@ -65,7 +68,7 @@ expect "$(fetch -o /dev/null -w '%{http_code}' "$base/missing")" 404 missing
 expect "$(fetch --path-as-is -o /dev/null -w '%{http_code}' "$base/../Makefile")" 403 traversal
 expect "$(fetch -f -d 'a=1&b=2' "$base/cgi-bin/adder")" 3 CGI
 expect "$(fetch -f "$base/cgi-bin/adder?b=7&a=-2")" 5 CGI
-expect "$(fetch -f "$base/api/?trace=private-marker")" a round-robin
+expect "$(fetch -f --request-target "$base/api/?trace=private-marker" "$base/")" a absolute-round-robin
 expect "$(fetch -f "$base/api/")" b round-robin
 
 proxy_get() {
@@ -74,6 +77,11 @@ proxy_get() {
 expect "$(proxy_get "$port" -f "http://127.0.0.1:$b/")" b forward
 expect "$(proxy_get "$port" -f -d 'a=12&b=30' "http://127.0.0.1:$b/cgi-bin/adder")" 42 forward-post
 expect "$(proxy_get "$a" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$b/")" 403 forward-disabled
+expect "$(fetch -H 'Host: other.example' --request-target "http://a.example:$a/" "http://127.0.0.1:$a/")" a local-absolute
+expect "$(fetch --request-target "http://localhost:$a/cgi-bin/adder?a=1&b=2" "http://127.0.0.1:$a/")" 3 local-absolute-cgi
+expect "$(fetch -o /dev/null -w '%{http_code}' "$base/self/")" 508 self-route
+expect "$(fetch -o /dev/null -w '%{http_code}' "$base/mixed/")" 502 cycle-and-unavailable
+expect "$(fetch -o /dev/null -w '%{http_code}' "$base/cycle/")" 508 two-proxy-cycle
 
 jobs_to_wait=()
 for file in index.html style.css app.js; do
