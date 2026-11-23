@@ -1,24 +1,56 @@
-// [http_response.c] HTTP 응답 생성 구현
 #include "http_response.h"
+#include "rio.h"
+#include "server_internal.h"
+#include <stdio.h>
 
 const char *status_text(int status) {
-    (void)status;
-    return "Unknown"; // TODO: 200, 400, 403, 404, 405, 411, 413, 414, 431, 500, 501, 502, 503, 504, 505
+    switch (status) {
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 408: return "Request Timeout";
+    case 411: return "Length Required";
+    case 413: return "Payload Too Large";
+    case 414: return "URI Too Long";
+    case 417: return "Expectation Failed";
+    case 431: return "Request Header Fields Too Large";
+    case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
+    case 505: return "HTTP Version Not Supported";
+    default: return "Unknown";
+    }
 }
 
-int send_headers(int fd, int status, const char *content_type, size_t content_length, int keep_alive) {
-    (void)fd; (void)status; (void)content_type; (void)content_length; (void)keep_alive;
-    // TODO: "HTTP/1.1 %d %s\r\n" + Content-Type + Content-Length + Connection(keep-alive/close) + "\r\n"
-    //       → snprintf로 만들고 rio_writen으로 송신
-    return -1;
+int send_headers(int fd, int status, const char *content_type, size_t content_length,
+                 int keep_alive) {
+    char headers[512];
+    int n = snprintf(headers, sizeof(headers),
+                     "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+                     "Connection: %s\r\n%s\r\n", status, status_text(status), content_type,
+                     content_length, keep_alive ? "keep-alive" : "close",
+                     status == 405 ? "Allow: GET, HEAD\r\n" : "");
+    if (n < 0 || (size_t)n >= sizeof(headers)) return -1;
+    return rio_writen(fd, headers, (size_t)n) < 0 ? -1 : 0;
 }
 
-int send_response(int fd, int status, const char *content_type, const void *body, size_t len, int keep_alive) {
-    (void)fd; (void)status; (void)content_type; (void)body; (void)len; (void)keep_alive;
-    return -1; // TODO: send_headers 후 body를 rio_writen
+int send_response(int fd, int status, const char *type, const void *body, size_t len,
+                  int keep_alive) {
+    if (send_headers(fd, status, type, len, keep_alive) < 0) return -1;
+    return rio_writen(fd, body, len) < 0 ? -1 : 0;
+}
+
+int send_request_error(int fd, int status, int keep_alive, int head_only) {
+    char body[128];
+    int n = snprintf(body, sizeof(body), "<h1>%d %s</h1>\n", status, status_text(status));
+    if (head_only) return send_headers(fd, status, "text/html", (size_t)n, keep_alive);
+    return send_response(fd, status, "text/html", body, (size_t)n, keep_alive);
 }
 
 int send_error(int fd, int status, int keep_alive) {
-    (void)fd; (void)status; (void)keep_alive;
-    return -1; // TODO: "<h1>404 Not Found</h1>" 같은 본문을 만들어 send_response (text/html)
+    return send_request_error(fd, status, keep_alive, 0);
 }

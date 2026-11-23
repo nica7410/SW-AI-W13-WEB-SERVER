@@ -1,46 +1,178 @@
-// [http_request.c] HTTP 요청 파서 구현
-// TCP는 메시지 경계가 없으므로 HTTP 규칙으로 경계를 찾는다: 헤더 끝 = 빈 줄("\r\n"), 본문 끝 = Content-Length
-#include "http_request.h"
+#include "http_request_internal.h"
+#include "forward_proxy.h"
+#include "http_fields.h"
+#include "proxy_internal.h"
+#include "server.h"
+#include <errno.h>
+#include <poll.h>
+#include <stdlib.h>
+
+#define REQUEST_HEADER_TIMEOUT_MS 5000
+#define REQUEST_BODY_TIMEOUT_MS   5000   // 본문 전체(최대 1MB)를 받는 시간. 느린 업로드가 워커를 붙잡지 못하게 한다
 
 int parse_request_line(const char *line, http_request *req) {
-    (void)line; (void)req;
-    // TODO:
-    //  - "메서드 URI 버전" 3개로 나눔. 개수가 다르면 400
-    //  - 메서드가 GET/POST/HEAD가 아니면 501
-    //  - URI가 MAX_URI_LEN 이상이면 414
-    //  - 버전이 HTTP/1.0, HTTP/1.1이 아니면 505
-    //  - URI를 '?' 기준으로 path / query로 분리 (절대 URI "http://host/..."면 호스트 뒤 부분 기준)
-    //  - keep_alive 기본값: HTTP/1.1이면 1, HTTP/1.0이면 0
-    return -1;
-}
+    size_t len = strcspn(line, "\r\n");
+    const char *end = line + len;
+    if (*end && strcmp(end, "\r\n") != 0) return 400;
+    const char *first = memchr(line, ' ', len);
+    if (!first || first == line) return 400;
+    const char *uri = first + 1;
+    const char *second = memchr(uri, ' ', (size_t)(end - uri));
+    if (!second || second == uri || second + 1 == end) return 400;
+    for (const char *p = line; p < first; p++)
+        if (!is_field_char((unsigned char)*p)) return 400;
+    size_t method_len = (size_t)(first - line);
+    if (method_len >= sizeof(req->method)) return 501;
+    memcpy(req->method, line, method_len);
+    req->method[method_len] = '\0';
+    if (strcmp(req->method, "GET") && strcmp(req->method, "POST") &&
+        strcmp(req->method, "HEAD")) return 501;
 
-int parse_header_line(const char *line, http_request *req) {
-    (void)line; (void)req;
-    // TODO:
-    //  - ':'가 없으면 400
-    //  - 헤더 개수가 MAX_HEADERS를 넘거나 이름·값이 너무 길면 431
-    //  - Content-Length: 숫자가 아니면 400, MAX_BODY_LEN 초과면 413
-    //  - Connection: close / keep-alive → keep_alive 갱신
-    return -1;
-}
+    size_t uri_len = (size_t)(second - uri);
+    if (uri_len >= sizeof(req->uri)) return 414;
+    for (const char *p = uri; p < second; p++)
+        if ((unsigned char)*p <= 32 || *p == 127 || *p == '#') return 400;
+    memcpy(req->uri, uri, uri_len);
+    req->uri[uri_len] = '\0';
 
-int read_request(rio_t *rp, http_request *req) {
-    (void)rp; (void)req;
-    // TODO:
-    //  1. rio_readlineb로 요청 라인 → parse_request_line (0바이트면 EOF → -1)
-    //  2. "\r\n"만 있는 줄이 나올 때까지 parse_header_line
-    //  3. HTTP/1.1인데 Host 헤더가 없으면 400
-    //  4. POST인데 Content-Length가 없으면 411, Transfer-Encoding: chunked면 501 (chunked 미지원)
-    //  5. content_length > 0 이면 malloc 후 rio_readnb로 정확히 그만큼 읽기
-    return -1;
+    const char *version = second + 1;
+    if (memchr(version, ' ', (size_t)(end - version))) return 400;
+    if (end - version != 8 ||
+        (memcmp(version, "HTTP/1.0", 8) && memcmp(version, "HTTP/1.1", 8))) return 505;
+    memcpy(req->version, version, 8);
+    req->version[8] = '\0';
+    req->keep_alive = version[7] == '1';
+
+    if (is_absolute_uri(req->uri)) {
+        char host[256], port[8];
+        if (parse_absolute_uri(req->uri, host, sizeof(host), port, sizeof(port),
+                               req->path, sizeof(req->path)) < 0) return 400;
+    } else {
+        if (req->uri[0] != '/') return 400;
+        strcpy(req->path, req->uri);
+    }
+    char *query = strchr(req->path, '?');
+    if (query) *query++ = '\0';
+    strcpy(req->query, query ? query : "");
+    return 0;
 }
 
 const char *get_header(const http_request *req, const char *name) {
-    (void)req; (void)name;
-    return NULL; // TODO: headers를 돌며 strcasecmp로 이름 비교
+    for (int i = 0; i < req->header_count; i++)
+        if (!strcasecmp(req->headers[i].name, name)) return req->headers[i].value;
+    return NULL;
+}
+
+int parse_header_line(const char *line, http_request *req) {
+    size_t len = strcspn(line, "\r\n");
+    if (line[len] && strcmp(line + len, "\r\n")) return 400;
+    const char *colon = memchr(line, ':', len);
+    if (!colon || colon == line) return 400;
+    size_t name_len = (size_t)(colon - line);
+    const char *value = colon + 1, *end = line + len;
+    while (value < end && (*value == ' ' || *value == '\t')) value++;
+    while (end > value && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    size_t value_len = (size_t)(end - value);
+    if (req->header_count >= MAX_HEADERS || name_len >= MAX_HEADER_NAME ||
+        value_len >= MAX_HEADER_VALUE) return 431;
+    for (const char *p = line; p < colon; p++)
+        if (!is_field_char((unsigned char)*p)) return 400;
+    for (const char *p = value; p < end; p++)
+        if (((unsigned char)*p < 32 && *p != '\t') || *p == 127) return 400;
+
+    http_header *h = &req->headers[req->header_count];
+    memcpy(h->name, line, name_len);
+    h->name[name_len] = '\0';
+    memcpy(h->value, value, value_len);
+    h->value[value_len] = '\0';
+    if (!strcasecmp(h->name, "Content-Length")) {
+        if (!value_len || get_header(req, h->name)) return 400;
+        size_t n = 0;
+        for (const char *p = value; p < end; p++) {
+            if (*p < '0' || *p > '9') return 400;
+            n = n * 10 + (size_t)(*p - '0');
+            if (n > MAX_BODY_LEN) return 413;
+        }
+        req->content_length = n;
+    } else if (!strcasecmp(h->name, "Host")) {
+        char host[MAX_HEADER_VALUE], port[8];
+        if (get_header(req, "Host") ||
+            parse_authority(h->value, value_len, "80", host, sizeof(host), port, sizeof(port)) < 0)
+            return 400;
+    } else if (!strcasecmp(h->name, "Connection")) {
+        if (has_option(h->value, "close")) req->keep_alive = 0;
+        else if (has_option(h->value, "keep-alive")) {
+            req->keep_alive = 1;
+            for (int i = 0; i < req->header_count; i++)
+                if (!strcasecmp(req->headers[i].name, "Connection") &&
+                    has_option(req->headers[i].value, "close")) req->keep_alive = 0;
+        }
+    }
+    req->header_count++;
+    return 0;
+}
+
+static int read_line(rio_t *rp, char *line, int too_long, deadline_ms end) {
+    ssize_t n = rio_readline_until(rp, line, MAX_LINE + 1, end);
+    if (n < 0 && errno == ETIMEDOUT) return 408;   // 요청을 보내기 시작했지만 마감까지 헤더를 다 못 보냄
+    if (n <= 0) return -1;
+    if (memchr(line, '\0', (size_t)n)) return 400;
+    if (line[n - 1] != '\n' && n == MAX_LINE) return too_long;
+    if (n < 2 || line[n - 2] != '\r' || line[n - 1] != '\n') return 400;
+    return 0;
+}
+
+int read_request_head_until(rio_t *rp, http_request *req, deadline_ms end) {
+    char line[MAX_LINE + 1];
+    int status = read_line(rp, line, 414, end);
+    if (status) return status;
+    status = parse_request_line(line, req);
+    if (status) return status;
+    for (;;) {
+        status = read_line(rp, line, 431, end);
+        if (status) return status;
+        if (!strcmp(line, "\r\n")) return 0;
+        status = parse_header_line(line, req);
+        if (status) return status;
+    }
+}
+
+int read_request(rio_t *rp, http_request *req) {
+    *req = (http_request){0};
+    if (!rp->cnt && wait_until(rp->fd, POLLIN, deadline_after(KEEPALIVE_TIMEOUT_SEC * 1000)) < 0)
+        return -1;
+    int status = read_request_head_until(rp, req, deadline_after(REQUEST_HEADER_TIMEOUT_MS));
+    if (status) return status;
+    if (!strcmp(req->version, "HTTP/1.1") && !get_header(req, "Host")) return 400;
+    if (get_header(req, "Transfer-Encoding"))
+        return get_header(req, "Content-Length") ? 400 : 501;
+    if (!strcmp(req->method, "POST") && !get_header(req, "Content-Length")) return 411;
+
+    const char *expect = get_header(req, "Expect");
+    if (expect && strcasecmp(expect, "100-continue")) return 417;
+    if (req->content_length) {
+        req->body = malloc(req->content_length);
+        if (!req->body) return 500;
+        static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
+        if (expect && strcmp(req->version, "HTTP/1.0") &&
+            rio_writen(rp->fd, interim, sizeof(interim) - 1) < 0) goto body_io_error;
+        ssize_t got = rio_readn_until(rp, req->body, req->content_length,
+                                      deadline_after(REQUEST_BODY_TIMEOUT_MS));
+        if (got != (ssize_t)req->content_length) {
+            // EOF로 짧게 끝난 경우(got >= 0)의 errno는 이전 호출의 값이므로 보지 않는다.
+            if (got >= 0 || errno != ETIMEDOUT) goto body_io_error;
+            free_request(req);
+            return 408;
+        }
+    }
+    return 0;
+
+body_io_error:
+    free_request(req);
+    return -1;
 }
 
 void free_request(http_request *req) {
-    (void)req;
-    // TODO: free(req->body), body = NULL
+    free(req->body);
+    req->body = NULL;
 }
