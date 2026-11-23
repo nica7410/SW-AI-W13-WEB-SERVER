@@ -42,7 +42,7 @@ static void close_interval(unsigned first, unsigned last) {
     for (unsigned fd = first; fd <= last; fd++) close((int)fd);
 }
 
-static void reap_child(pid_t child, int abort_child, deadline_ms end) {
+static void reap_child(pid_t child, int owns_group, int abort_child, deadline_ms end) {
     // CGI가 출력을 닫은 후에도 끝나지 않으면 워커를 계속 점유하지 않게 한다.
     deadline_ms idle_end = deadline_after(KEEPALIVE_TIMEOUT_SEC * 1000);
     if (idle_end < end) end = idle_end;
@@ -52,6 +52,8 @@ static void reap_child(pid_t child, int abort_child, deadline_ms end) {
         struct timespec pause = {.tv_nsec = 10000000};
         nanosleep(&pause, NULL);
     }
+    // Keep the direct child unreaped until the group signal has used its reserved PID.
+    if (owns_group) kill(-child, SIGKILL);
     kill(child, SIGKILL);
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
 }
@@ -90,7 +92,8 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
         setsockopt(out[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0)
         child = fork();
     if (child == 0) {
-        if (dup2(in, STDIN_FILENO) >= 0 && dup2(out[1], STDOUT_FILENO) >= 0) {
+        if (setpgid(0, 0) == 0 && dup2(in, STDIN_FILENO) >= 0 &&
+            dup2(out[1], STDOUT_FILENO) >= 0) {
             int low = program < report[1] ? program : report[1];
             int high = program > report[1] ? program : report[1];
             close_interval(3, (unsigned)(low - 1));
@@ -110,6 +113,7 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
         do { n = write(report[1], &error, sizeof(error)); } while (n < 0 && errno == EINTR);
         _exit(127);
     }
+    int owns_group = child > 0 && (setpgid(child, child) == 0 || getpgid(child) == child);
     fclose(input);
     close(out[1]);
     close(report[1]);
@@ -128,7 +132,7 @@ int serve_open_cgi(int fd, int program, char *path, const http_request *req) {
     }
     close(report[0]);
     close(out[0]);
-    if (child > 0) reap_child(child, status != 0, end);
+    if (child > 0) reap_child(child, owns_group, status != 0, end);
     return status;
 }
 

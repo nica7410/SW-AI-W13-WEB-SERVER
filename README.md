@@ -102,7 +102,7 @@ curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
 | `make test` | HTTP 요청 라인·헤더·크기 상한·헤더/본문 마감(408), MIME 매핑, 절대 URI, 최장 접두사·Round-Robin, 프록시 중계·마감, 파일 경계·CGI·TCP 오류 응답, 스레드 풀 대기 판단 |
 | `bash tests/functional.sh` | 실제 서버 5개에서 정적 파일·MIME, CGI GET/POST, keep-alive·HEAD, 동시 접속, Forward 허용 여부, Reverse 분산·장애 전환·502/504, 워커 1개 서버의 유휴 연결 양보, 큐가 넘칠 때 503 응답 전체 전달 확인 |
 | `make asan` | AddressSanitizer와 UBSan을 적용해 빌드하고 단위 테스트 실행 |
-| `python3 tests/test_shutdown.py` | CGI 응답 진행 중 SIGTERM 유예와 직접 실행한 자식 회수 확인 |
+| `python3 tests/test_shutdown.py` | SIGTERM 유예, CGI 직접 자식 회수, 같은 그룹에서 응답을 계속 쓰는 하위 프로세스 종료 확인 |
 | `bash tests/load.sh` | 실행 중인 서버에 동시 접속 수를 바꿔 가며 요청을 보내 처리량·실패·최장 지연 측정 |
 
 기능 테스트는 `make` 후 실행하며 Bash, curl, Python 3과 연속된 빈 포트 6개가 필요합니다. 기본 포트는 18080~18085이고 `PORT=19080 bash tests/functional.sh`처럼 바꿀 수 있습니다.
@@ -180,4 +180,5 @@ URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 9 32 64 100 256" KEEPALIVE
 - Reverse Proxy에 백엔드가 둘 이상이면 연결에 실패한 후보를 5초간 제외합니다. 남은 후보끼리 라운드로빈을 적용하고 제외 기간이 끝나면 요청 하나가 해당 서버의 복구를 확인합니다. 모든 후보가 제외 또는 복구 확인 중이면 502를 즉시 반환합니다. 실패를 동시에 발견한 요청은 각각 지연될 수 있습니다.
 - 정적 파일과 CGI에서 루트 안을 가리키는 심볼릭 링크를 사용할 수 있습니다. Linux·WSL은 검증한 파일 디스크립터로 CGI를 실행합니다. macOS의 CGI 실행은 경로를 다시 참조하므로 같은 보강이 남아 있습니다.
 - CGI에는 메서드, 쿼리, 본문 길이와 타입을 환경 변수로 전달합니다. POST 본문은 임시 파일을 통해 표준 입력으로 전달하므로 큰 본문과 프로그램 출력이 서로를 막지 않습니다.
+- CGI 요청마다 전용 프로세스 그룹을 만듭니다. 중계 오류나 마감 만료로 CGI를 중단할 때는 같은 그룹의 하위 작업에도 종료 신호를 보내고 직접 자식은 `waitpid`로 회수합니다.
 - 끝에 `/`가 없는 디렉터리 요청은 리다이렉트 없이 403입니다. 요청 줄바꿈은 CRLF만 받습니다.
