@@ -55,7 +55,8 @@ static int write_request(int fd, const http_request *req, const char *target, de
         if (!skip_header(req, h->name) && send_field(fd, h->name, h->value, end) < 0)
             return -1;
     }
-    snprintf(line, sizeof(line), "%s %s", req->version + 5, identity);
+    const char *comment = proxy_via_comment();
+    snprintf(line, sizeof(line), "%s %s%s%s", req->version + 5, identity, *comment ? " " : "", comment);
     if (reverse_peer) {
         if (*reverse_peer && send_field(fd, "X-Forwarded-For", reverse_peer, end) < 0) return -1;
         if (send_field(fd, "X-Forwarded-Proto", "http", end) < 0) return -1;

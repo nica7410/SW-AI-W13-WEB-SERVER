@@ -221,6 +221,8 @@ int run_server(const server_config *cfg) {
         goto close_roots;
     }
     int queue_size = fit_queue_to_fd_limit(cfg->threads, cfg->queue_size);
+    if (!*proxy_via_comment())
+        fprintf(stderr, "warning: using only socket addresses for proxy loop detection\n");
     threadpool *pool = threadpool_create(cfg->threads, queue_size, handle_connection);
     if (!pool) {
         fprintf(stderr, "cannot create worker pool\n");

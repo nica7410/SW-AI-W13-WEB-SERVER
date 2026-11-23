@@ -86,7 +86,7 @@ static void test_forward_post_and_chunked_response(void) {
     CHECK(strstr(request, "POST /x?q HTTP/1.1\r\nHost: origin:81\r\n") == request);
     CHECK(strstr(request, "X-Local") == NULL && strstr(request, "old-host") == NULL);
     CHECK(!strstr(request, "X-Forwarded-"));
-    CHECK(strstr(request, "Via: 1.0 previous\r\n") && strstr(request, "Via: 1.1 w13-proxy\r\n"));
+    CHECK(strstr(request, "Via: 1.0 previous\r\n") && strstr(request, "Via: 1.1 w13-proxy (w13-"));
     CHECK(strstr(request, "Content-Length: 3\r\n") && strstr(request, "Connection: close\r\n"));
     char *separator = strstr(request, "\r\n\r\n");
     CHECK(separator && request_size == separator + 4 - request + (ssize_t)sizeof(post) &&
@@ -163,6 +163,59 @@ static void test_total_response_deadline(void) {
 
 static int connect_calls, healthy_fd;
 static deadline_ms request_end;
+
+static int connect_origin(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
+                          int *peer_failed) {
+    (void)host; (void)port; (void)end; (void)lookup; (void)peer_failed;
+    connect_calls++;
+    return healthy_fd;
+}
+
+static void test_via_reentry(void) {
+    int client[2], origin[2];
+    tcp_pair(client);
+    make_pair(origin);
+    http_request req = {0};
+    CHECK(parse_request_line("GET /api/ HTTP/1.1\r\n", &req) == 0);
+    static const char reply[] = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    CHECK(rio_writen(origin[1], reply, sizeof(reply) - 1) > 0);
+    CHECK(proxy_relay(client[0], origin[0], &req, req.uri) == 0);
+    char wire[512];
+    finish_and_read(origin, wire, sizeof(wire));
+    close_pair(origin);
+
+    const char *via = strstr(wire, "\r\nVia: 1.1 127.0.0.1:");
+    char port[6], marker[48];
+    require(via && sscanf(via, " Via: 1.1 127.0.0.1:%5[0-9] %47[^\r\n]", port, marker) == 2,
+            "read forwarded Via");
+    CHECK(!strncmp(marker, "(w13-", 5) && strlen(marker) == 38 && marker[37] == ')');
+    route r;
+    CHECK(parse_route_line("/api/ origin:80", &r) == 1);
+    CHECK(parse_header_line("Via: 1.1 old\r\n", &req) == 0);
+    char field[256];
+    snprintf(field, sizeof(field), "Via: 1.1 edge (a\\),b), 1.1 192.0.2.1:%s %s\r\n", port, marker);
+    CHECK(parse_header_line(field, &req) == 0);
+    connect_calls = 0;
+    healthy_fd = -1;
+    CHECK(reverse_proxy_until(client[0], &req, &r, deadline_after(1000), connect_origin) == 508);
+    CHECK(connect_calls == 0);
+
+    req.header_count--;
+    snprintf(field, sizeof(field), "Via: 1.1 edge (nested %s)\r\n", marker);
+    CHECK(parse_header_line(field, &req) == 0);
+    marker[5] = marker[5] == '0' ? '1' : '0';
+    snprintf(field, sizeof(field), "Via: 1.1 192.0.2.1:%s %s\r\n", port, marker);
+    CHECK(parse_header_line(field, &req) == 0);
+    make_pair(origin);
+    healthy_fd = origin[0];
+    CHECK(rio_writen(origin[1], reply, sizeof(reply) - 1) > 0);
+    CHECK(reverse_proxy_until(client[0], &req, &r, deadline_after(1000), connect_origin) == 0);
+    CHECK(connect_calls == 1);
+    read_wire(origin[1], wire, sizeof(wire));
+    CHECK(strstr(wire, "GET /api/ HTTP/1.1\r\n") == wire);
+    close(origin[1]);
+    close_pair(client);
+}
 
 static int connect_candidate(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
                              int *peer_failed) {
@@ -312,6 +365,7 @@ int main(void) {
     test_truncated_chunk();
     test_total_response_deadline();
     test_connection_failover();
+    test_via_reentry();
     test_cooldown_recovery();
     test_deadline();
     return TEST_RESULT();
