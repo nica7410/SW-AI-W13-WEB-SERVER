@@ -1,4 +1,5 @@
 #include "proxy.h"
+#include "access_log.h"
 #include "upstream.h"
 #include "forward_proxy.h"
 #include "http_fields.h"
@@ -91,6 +92,7 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
         int share = left / attempt.eligible;
         deadline_ms attempt_end = end - left + (share ? share : 1);
         int peer_failed = 0;
+        access_attempt(b);
         int upstream = connect_backend(b->host, b->port, attempt_end, getaddrinfo, &peer_failed);
         int connect_error = errno;
         int backend_failure = peer_failed && deadline_left(end) &&
@@ -102,6 +104,7 @@ int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadlin
             continue;
         }
         // 연결 전 실패만 재시도한다. 이미 전달한 POST가 두 번 실행될 수 있다.
+        access_connected(b);
         int status = relay_until(clientfd, upstream, req, req->uri, end);
         close(upstream);
         return status;

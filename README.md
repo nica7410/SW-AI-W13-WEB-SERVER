@@ -92,8 +92,22 @@ curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
 | `-g` | ./cgi-bin | CGI 폴더를 열 수 없으면 경고 후 기동 |
 | `-c` | 없음 | 라우팅 설정 파일 (지정하면 Reverse Proxy 동작) |
 | `-f` | 꺼짐 | Forward Proxy 허용 |
+| `-v` | 꺼짐 | 요청마다 접근 로그 한 줄을 stderr에 출력 |
 | `-t` | 8 | 워커 스레드 수 |
 | `-q` | 1024 | 연결 대기 큐 크기 (가득 차면 503). 열린 파일 한도(`ulimit -n`)보다 크면 한도를 올리거나 큐를 줄이고 경고를 출력 |
+
+### 접근 로그로 분산과 장애 전환 확인하기
+
+`./bin/server -c conf/routes.conf -v`로 실행하면 다음과 같은 로그가 출력됩니다. `first`는 처음 연결을 시도한 백엔드, `connected`는 연결에 성공한 백엔드입니다. 세 번째 줄에서는 8001번 연결에 실패해 8002번에서 응답을 받았습니다.
+
+```text
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8001 attempts=1
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8002 connected=127.0.0.1:8002 attempts=1
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8002 attempts=2
+access event=overload method=- path=- status=503 outcome=complete first=- connected=- attempts=0
+```
+
+큐가 가득 차면 요청을 읽기 전에 503을 보내므로 메서드와 경로가 `-`로 표시됩니다. 중간에 전송이 끊기면 `outcome=aborted`가 남습니다. 그때 `status=-`이면 최종 헤더를 다 보내기 전이고, `status=200`이면 200 헤더를 보낸 뒤입니다. 경로에서 쿼리를 빼고 본문과 요청 헤더도 생략합니다.
 
 ## 검증
 

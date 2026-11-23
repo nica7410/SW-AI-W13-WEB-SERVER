@@ -23,13 +23,14 @@ int main(int argc, char **argv) {
     server_config cfg = {.port = "8080", .root = "./www", .cgi_dir = "./cgi-bin",
                          .threads = 8, .queue_size = 1024};
     int opt;
-    while ((opt = getopt(argc, argv, "p:r:g:c:ft:q:")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:g:c:ft:q:v")) != -1) {
         switch (opt) {
         case 'p': cfg.port = optarg; break;
         case 'r': cfg.root = optarg; cfg.root_explicit = 1; break;
         case 'g': cfg.cgi_dir = optarg; break;
         case 'c': cfg.routes_path = optarg; break;
         case 'f': cfg.forward_enabled = 1; break;
+        case 'v': cfg.verbose = 1; break;
         case 't': cfg.threads = positive_number(optarg, INT_MAX); break;
         case 'q': cfg.queue_size = positive_number(optarg, INT_MAX); break;
         default: goto usage;
@@ -47,6 +48,6 @@ int main(int argc, char **argv) {
     return run_server(&cfg) == 0 ? 0 : 1;
 usage:
     fprintf(stderr, "usage: %s [-p port] [-r root] [-g cgi_dir] [-c routes.conf]"
-                    " [-f] [-t threads] [-q queue_size]\n", argv[0]);
+                    " [-f] [-t threads] [-q queue_size] [-v]\n", argv[0]);
     return 1;
 }

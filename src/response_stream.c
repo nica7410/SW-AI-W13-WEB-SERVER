@@ -1,4 +1,5 @@
 #include "response_stream.h"
+#include "access_log.h"
 #include "forward_proxy.h"
 #include "proxy.h"
 #include "upstream.h"
@@ -271,6 +272,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     if (!from_cgi && is_absolute_uri(req->uri) &&
         write_line(clientfd, end, "Via: ", line[7] == '0' ? "1.0" : "1.1", " w13-proxy") < 0) return -1;
     if (send_until(clientfd, "\r\n", 2, end) < 0) return -1;
+    access_headers_sent(code);
     if (!strcmp(req->method, "HEAD") || code == 204 || code == 304) return 0;
     if (chunked) return chunked_body(&rio, clientfd, &fields, end);
     return body_to_client(&rio, clientfd, has_length, length, end);

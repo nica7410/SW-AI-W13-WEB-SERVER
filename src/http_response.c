@@ -1,4 +1,5 @@
 #include "http_response.h"
+#include "access_log.h"
 #include "deadline.h"
 #include "rio.h"
 #include "server_internal.h"
@@ -51,7 +52,9 @@ int send_headers(int fd, int status, const char *content_type, size_t content_le
                      dated ? "Date: " : "", dated ? date : "", dated ? "\r\n" : "",
                      status == 405 ? "Allow: GET, HEAD\r\n" : "");
     if (n < 0 || (size_t)n >= sizeof(headers)) return -1;
-    return send_until(fd, headers, (size_t)n, INT64_MAX);
+    if (send_until(fd, headers, (size_t)n, INT64_MAX) < 0) return -1;
+    access_headers_sent(status);
+    return 0;
 }
 
 int send_response(int fd, int status, const char *type, const void *body, size_t len,

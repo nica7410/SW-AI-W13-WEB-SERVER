@@ -1,4 +1,5 @@
 #include "server.h"
+#include "access_log.h"
 #include "server_internal.h"
 #include "deadline.h"
 #include "cgi.h"
@@ -155,6 +156,7 @@ void handle_connection(int connfd) {
         }
         http_request req;
         int result = read_request(&rio, &req);
+        if (g_cfg && g_cfg->verbose && (result >= 0 || *req.method)) access_begin();
         int rejected = result > 0;
         // 응답 시점에 쉬는 워커가 없고 큐에 기다리는 연결이 있으면 이 응답을 마지막으로 연결을 넘긴다.
         // 그래서 동시 keep-alive 연결이 워커 수보다 많으면 연결 재사용 없이 돌아가며 처리된다.
@@ -168,6 +170,7 @@ void handle_connection(int connfd) {
         } else if (yielded && !result) {
             linger_close_input(connfd, 50);   // 파이프라이닝으로 이어 보낸 요청이 있어도 응답을 지킨다
         }
+        access_finish(&req, result);
         free_request(&req);
         if (result < 0 || !req.keep_alive) break;
         if (atomic_load_explicit(&g_stop, memory_order_relaxed)) break;
@@ -250,7 +253,10 @@ int run_server(const server_config *cfg) {
         } else if (threadpool_submit(pool, fd) < 0) {
             // 요청을 읽지 않은 채 바로 close하면 RST가 503 응답을 앞질러 클라이언트가 응답을 잃는다.
             // 송신만 닫고, 클라이언트가 닫을 때까지 accept 루프가 입력을 버리다가 close한다.
-            if (send_error(fd, 503, 0) < 0 || nfds == 1 + MAX_REJECTED || shutdown(fd, SHUT_WR) < 0) {
+            if (cfg->verbose) access_begin();
+            int sent = send_error(fd, 503, 0);
+            access_finish(NULL, sent);
+            if (sent < 0 || nfds == 1 + MAX_REJECTED || shutdown(fd, SHUT_WR) < 0) {
                 close(fd);
             } else {
                 fds[nfds] = (struct pollfd){.fd = fd, .events = POLLIN};
