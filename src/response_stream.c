@@ -119,7 +119,9 @@ static int chunked_body(rio_t *rio, int clientfd, const struct fields *headers, 
     char line[MAX_LINE + 1];
     for (;;) {
         uintmax_t size;
-        if (next_line(rio, line, 0, end) || !parse_chunk_size(line, &size, NULL)) return -1;
+        size_t extension_bytes;
+        if (next_line(rio, line, 0, end) || !parse_chunk_size(line, &size, &extension_bytes)) return -1;
+        if (!extension_bytes) line[strcspn(line, " \t")] = '\0';
         if (!size) break;
         if (write_line(clientfd, end, line, "", "") < 0 ||
             body_to_client(rio, clientfd, 1, size, end) < 0) return -1;

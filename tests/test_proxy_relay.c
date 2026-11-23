@@ -60,8 +60,12 @@ static void test_forward_post_and_chunked_response(void) {
     char post[] = {'a', '\0', 'b'};
     req.body = post;
 
-    static const char chunks[] = "3;tag=\"a;b\"\r\nx\0y\r\n0\r\nX-Sum: ok\r\n\r\n";
-    static const char incoming[] = "3;tag=\"a;b\"\r\nx\0y\r\n0\r\nX-Local: local\r\nX-Sum: ok\r\n\r\n";
+    static const char chunks[] = "3;tag=\"a;b\"\r\nx\0y\r\n"
+                                 "0A\r\n0123456789\r\n"
+                                 "00\r\nX-Sum: ok\r\n\r\n";
+    static const char incoming[] = "3;tag=\"a;b\"\r\nx\0y\r\n"
+                                   "0A \r\n0123456789\r\n"
+                                   "00\t\r\nX-Local: local\r\nX-Sum: ok\r\n\r\n";
     // "X:" + value + CRLF exactly fills the accepted input line.
     char value[MAX_LINE - 3];
     // The header can exceed the socket buffer. Run the relay while its peers write and read.
