@@ -73,17 +73,18 @@ static void test_host_syntax(void) {
     }
 }
 
-static void test_expect(const char *version, const char *expected) {
+static void check_expect(const char *version, const char *fields, const char *framed_body,
+                         int status, const char *expected) {
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) { CHECK(0); return; }
-    CHECK(dprintf(pair[1], "POST / HTTP/%s\r\nHost: h\r\nExpect: 100-continue\r\n"
-                           "Content-Length: 1\r\n\r\nx", version) > 0);
+    CHECK(dprintf(pair[1], "POST / HTTP/%s\r\nHost: h\r\n%s%s", version, fields, framed_body) > 0);
     shutdown(pair[1], SHUT_WR);
     rio_t in, out;
     rio_readinitb(&in, pair[0]);
     http_request req;
-    CHECK(read_request(&in, &req) == 0);
-    CHECK(req.content_length == 1 && req.body && req.body[0] == 'x');
+    CHECK(read_request(&in, &req) == status);
+    if (!status && req.content_length) CHECK(req.content_length == 1 && req.body && req.body[0] == 'x');
+    if (status) CHECK(req.body == NULL);
     free_request(&req);
     shutdown(pair[0], SHUT_WR);
     char reply[64] = {0};
@@ -92,6 +93,22 @@ static void test_expect(const char *version, const char *expected) {
     CHECK_STR(reply, expected);
     close(pair[0]);
     close(pair[1]);
+}
+
+static void test_expect(void) {
+    const char *single = "Expect: 100-continue\r\n";
+    const char *body = "Content-Length: 1\r\n\r\nx";
+    const char *waiting = "Content-Length: 1\r\n\r\n";
+    const char *interim = "HTTP/1.1 100 Continue\r\n\r\n";
+    check_expect("1.0", single, body, 0, "");
+    check_expect("1.1", single, body, 0, interim);
+    check_expect("1.1", single, "Content-Length: 0\r\n\r\n", 0, "");
+    check_expect("1.1", "Expect: ,\r\nexpect: 100-CONTINUE,\t100-continue ,\r\n",
+                 "Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n", 0, interim);
+    check_expect("1.1", "Expect: 100-continue\r\nExpect: other\r\n", waiting, 417, "");
+    check_expect("1.1", "Expect: other\r\nExpect: 100-continue\r\n", waiting, 417, "");
+    check_expect("1.1", "Expect: 100-continue, other\r\n", waiting, 417, "");
+    check_expect("1.1", "Expect:\r\nExpect: , ,\r\n", waiting, 417, "");
 }
 
 static void test_body_io_error(int fail_continue) {
@@ -237,8 +254,7 @@ static void check_chunk_error(const char *fields_and_chunks, int expected) {
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_host_syntax();
-    test_expect("1.0", "");
-    test_expect("1.1", "HTTP/1.1 100 Continue\r\n\r\n");
+    test_expect();
     test_header_deadline();
     test_body_deadline();
     test_chunked_request();

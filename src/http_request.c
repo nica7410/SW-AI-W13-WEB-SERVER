@@ -165,6 +165,30 @@ static int request_coding(const http_request *req) {
     return unsupported ? 501 : 0;
 }
 
+static int parse_expectations(const http_request *req, int *expect_continue) {
+    static const char supported[] = "100-continue";
+    int present = 0;
+    *expect_continue = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        const http_header *h = &req->headers[i];
+        if (strcasecmp(h->name, "Expect")) continue;
+        present = 1;
+        const char *p = h->value;
+        while (*p) {
+            p += strspn(p, " \t,");
+            if (!*p) break;
+            const char *end = p + strcspn(p, ",");
+            const char *trim = end;
+            while (trim > p && (trim[-1] == ' ' || trim[-1] == '\t')) trim--;
+            if ((size_t)(trim - p) != sizeof(supported) - 1 ||
+                strncasecmp(p, supported, sizeof(supported) - 1)) return 417;
+            *expect_continue = 1;
+            p = end;
+        }
+    }
+    return present && !*expect_continue ? 417 : 0;
+}
+
 static int read_trailers(rio_t *rp, deadline_ms end) {
     char line[MAX_LINE + 1];
     for (int count = 0; ; count++) {
@@ -225,15 +249,16 @@ int read_request(rio_t *rp, http_request *req) {
         if (status) return status;
     } else if (!strcmp(req->method, "POST") && !get_header(req, "Content-Length")) return 411;
 
-    const char *expect = get_header(req, "Expect");
-    if (expect && strcasecmp(expect, "100-continue")) return 417;
+    int expect_continue;
+    status = parse_expectations(req, &expect_continue);
+    if (status) return status;
     if (!chunked && !req->content_length) return 0;
     if (!chunked) {
         req->body = malloc(req->content_length);
         if (!req->body) return 500;
     }
     static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
-    if (expect && strcmp(req->version, "HTTP/1.0") &&
+    if (expect_continue && strcmp(req->version, "HTTP/1.0") &&
         send_until(rp->fd, interim, sizeof(interim) - 1, INT64_MAX) < 0) {
         free_request(req);
         return -1;
