@@ -140,10 +140,6 @@ static int write_via(int client, const char *version, deadline_ms end) {
 
 static int send_informational(int client, const http_request *req, const char *line,
                               const struct fields *fields, deadline_ms end) {
-    for (size_t i = 0; i < fields->count; i++) {
-        const char *name = fields->items[i].name;
-        if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding")) return 502;
-    }
     if (write_line(client, end, "HTTP/1.1 ", line + 9, line[12] ? "" : " ") < 0) return -1;
     for (size_t i = 0; i < fields->count; i++) {
         const char *name = fields->items[i].name;
@@ -176,6 +172,11 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         int rc = read_fields(&rio, &fields, from_cgi, header_end);
         if (rc) return rc;
         if (code >= 200) break;
+        for (size_t i = 0; i < fields.count; i++) {
+            const char *name = fields.items[i].name;
+            if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding"))
+                return 502;
+        }
         if (!strcmp(req->version, "HTTP/1.0")) continue;
         if (code == 100 && get_header(req, "Expect") &&
             (req->content_length || get_header(req, "Transfer-Encoding"))) continue;
@@ -184,7 +185,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
     }
 
     time_t received = time(NULL);
-    int has_length = 0, transfer_encoded = 0, chunked = 0, has_type = 0;
+    int has_length = 0, transfer_encoded = 0, chunked = 0, has_type = 0, has_status = 0;
     uintmax_t length = 0;
     for (size_t i = 0; i < fields.count; i++) {
         const char *name = fields.items[i].name, *v = fields.items[i].value;
@@ -196,17 +197,20 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
             if (errno) return error;
             has_length = 1;
         } else if (!strcasecmp(name, "Transfer-Encoding")) {
-            if (from_cgi || !strcmp(req->version, "HTTP/1.0") ||
+            if (from_cgi || line[7] == '0' || !strcmp(req->version, "HTTP/1.0") ||
                 connection_field(&fields, name)) return error;
             if (!parse_transfer_codings(v, &chunked)) return error;
             transfer_encoded = 1;
         } else if (from_cgi && !strcasecmp(name, "Status")) {
+            if (has_status) return error;
+            has_status = 1;
             code = status_code(v);
             if (code < 200) return error;
             reason = v;
         } else if (!strcasecmp(name, "Content-Type")) has_type = 1;
     }
     if ((has_length && transfer_encoded) || (from_cgi && !has_type)) return error;
+    if (code == 204 && (has_length || transfer_encoded)) return error;
 
     if (!deadline_left(header_end)) return stream_error(from_cgi);
     if (write_line(clientfd, end, "HTTP/1.1 ", reason, reason[3] ? "" : " ") < 0 ||

@@ -112,20 +112,25 @@ static void test_forward_post_and_chunked_response(void) {
     close_pair(origin);
 }
 
-static void check_connection_content_length(int from_cgi) {
+static void check_response(int from_cgi, const char *input, int expected) {
     int client[2], source[2];
     make_pair(client);
     make_pair(source);
     http_request req = {0};
     CHECK(parse_request_line("GET / HTTP/1.1\r\n", &req) == 0);
-    CHECK(dprintf(source[1], "%sContent-Type: text/plain\r\nContent-Length: 1\r\n"
-                             "Connection: close, cOnTeNt-LeNgTh\r\n\r\nx",
-                  from_cgi ? "" : "HTTP/1.1 200 OK\r\n") > 0);
+    CHECK(rio_writen(source[1], input, strlen(input)) == (ssize_t)strlen(input));
+    shutdown(source[1], SHUT_WR);
     deadline_ms end = deadline_after(1000);
-    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) ==
-          (from_cgi ? 500 : 502));
-    char wire[2];
-    CHECK(finish_and_read(client, wire, sizeof(wire)) == 0);
+    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) == expected);
+    char wire[512];
+    ssize_t n = finish_and_read(client, wire, sizeof(wire));
+    if (expected) {
+        CHECK(n == 0);
+    } else {
+        const char *body = strstr(wire, "\r\n\r\n");
+        CHECK(strstr(wire, "HTTP/1.1 204 No Content\r\n") == wire);
+        CHECK(body && body + 4 - wire == n);
+    }
     close_pair(source);
     close_pair(client);
 }
@@ -380,8 +385,15 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     alarm(8);
     test_forward_post_and_chunked_response();
-    check_connection_content_length(0);
-    check_connection_content_length(1);
+    const char *conflict = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\n"
+                           "Connection: close, cOnTeNt-LeNgTh\r\n\r\nx";
+    check_response(0, conflict, 502);
+    check_response(1, strchr(conflict, '\n') + 1, 500);
+    check_response(0, "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 502);
+    check_response(0, "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n", 502);
+    check_response(1, "Content-Type: text/plain\r\nContent-Length: 0\r\nStatus: 204\r\n\r\n", 500);
+    check_response(1, "Content-Type: text/plain\r\nStatus: 200 OK\r\nsTaTuS: 200 OK\r\n\r\n", 500);
+    check_response(0, "HTTP/1.1 204 No Content\r\n\r\n", 0);
     test_truncated_chunk();
     test_total_response_deadline();
     test_connection_failover();

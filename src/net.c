@@ -97,11 +97,15 @@ static void *resolve_job(void *arg) {
 
 static int resolve_until(const char *host, const char *port, deadline_ms end,
                          lookup_fn *lookup, struct addrinfo **list, int *contacted) {
+    *list = NULL;
     struct in6_addr numeric;
     if (inet_pton(AF_INET, host, &numeric) || inet_pton(AF_INET6, host, &numeric)) {
         struct addrinfo hints = {.ai_socktype = SOCK_STREAM,
                                  .ai_flags = AI_NUMERICHOST | AI_NUMERICSERV};
-        return getaddrinfo(host, port, &hints, list) == 0 ? 0 : EHOSTUNREACH;
+        struct addrinfo *addresses;
+        if (getaddrinfo(host, port, &hints, &addresses) != 0) return EHOSTUNREACH;
+        *list = addresses;
+        return 0;
     }
     pthread_once(&query_once, init_query_condition);
     if (query_init_error) return query_init_error;
@@ -130,8 +134,9 @@ static int resolve_until(const char *host, const char *port, deadline_ms end,
             pthread_mutex_unlock(&query_lock);
             return error;
         }
-        *list = q->addresses;
-        if (!*list) error = q->error ? q->error : EHOSTUNREACH;
+        if (!q->addresses) error = q->error ? q->error : EHOSTUNREACH;
+        else if (error) freeaddrinfo(q->addresses);
+        else *list = q->addresses;
     }
     pthread_mutex_unlock(&query_lock);
     free(q);

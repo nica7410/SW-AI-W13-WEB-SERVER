@@ -26,7 +26,7 @@ typedef struct {
 } http_header;
 
 typedef struct {
-    char method[8];                      // "GET", "POST", "HEAD" (그 외는 501)
+    char method[16];                     // 미지원 메서드도 로그에 기록한다. 긴 이름은 ...로 끝난다.
     char uri[MAX_URI_LEN];               // 원본 URI 그대로 ("/cgi-bin/adder?a=1&b=2" 또는 Forward Proxy의 "http://host/a.html")
     char path[MAX_URI_LEN];              // '?' 앞 ("/cgi-bin/adder"). 절대 URI면 호스트 뒤의 경로 부분
     char query[MAX_URI_LEN];             // '?' 뒤, 없으면 "" ("a=1&b=2")

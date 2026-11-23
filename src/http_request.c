@@ -23,7 +23,12 @@ int parse_request_line(const char *line, http_request *req) {
     for (const char *p = line; p < first; p++)
         if (!is_field_char((unsigned char)*p)) return 400;
     size_t method_len = (size_t)(first - line);
-    if (method_len >= sizeof(req->method)) return 501;
+    if (method_len >= sizeof(req->method)) {
+        size_t prefix = sizeof(req->method) - sizeof("...");
+        memcpy(req->method, line, prefix);
+        memcpy(req->method + prefix, "...", sizeof("..."));
+        return 501;
+    }
     memcpy(req->method, line, method_len);
     req->method[method_len] = '\0';
     if (strcmp(req->method, "GET") && strcmp(req->method, "POST") &&
@@ -37,9 +42,10 @@ int parse_request_line(const char *line, http_request *req) {
     req->uri[uri_len] = '\0';
 
     const char *version = second + 1;
-    if (memchr(version, ' ', (size_t)(end - version))) return 400;
-    if (end - version != 8 ||
-        (memcmp(version, "HTTP/1.0", 8) && memcmp(version, "HTTP/1.1", 8))) return 505;
+    if (end - version != 8 || memcmp(version, "HTTP/", 5) ||
+        version[5] < '0' || version[5] > '9' || version[6] != '.' ||
+        version[7] < '0' || version[7] > '9') return 400;
+    if (version[5] != '1' || (version[7] != '0' && version[7] != '1')) return 505;
     memcpy(req->version, version, 8);
     req->version[8] = '\0';
     req->keep_alive = version[7] == '1';
@@ -95,10 +101,10 @@ int parse_header_line(const char *line, http_request *req) {
     if (status) return status;
     size_t value_len = strlen(h->value);
     if (!strcasecmp(h->name, "Content-Length")) {
-        if (!value_len || get_header(req, h->name)) return 400;
+        if (!value_len || get_header(req, h->name) ||
+            strspn(h->value, "0123456789") != value_len) return 400;
         size_t n = 0;
         for (const char *p = h->value; *p; p++) {
-            if (*p < '0' || *p > '9') return 400;
             n = n * 10 + (size_t)(*p - '0');
             if (n > MAX_BODY_LEN) return 413;
         }

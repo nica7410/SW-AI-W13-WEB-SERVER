@@ -23,6 +23,11 @@ static void test_request_lines(void) {
     CHECK(parse_request_line("GET /\r\n", &req) == 400);
     CHECK(parse_request_line("GET / HTTP/1.1 extra\r\n", &req) == 400);
     CHECK(parse_request_line("DELETE / HTTP/1.1\r\n", &req) == 501);
+    CHECK(parse_request_line("PROPFIND / HTTP/1.1\r\n", &req) == 501);
+    CHECK_STR(req.method, "PROPFIND");
+    CHECK(parse_request_line("ABCDEFGHIJKLMNOP / HTTP/1.1\r\n", &req) == 501);
+    CHECK(!memcmp(req.method, "ABCDEFGHIJKL...", sizeof(req.method)));
+    CHECK(parse_request_line("GET / HTTP/1.x\r\n", &req) == 400);
     CHECK(parse_request_line("GET / HTTP/2.0\r\n", &req) == 505);
 
     char uri[MAX_URI_LEN + 1], line[MAX_URI_LEN + 32];
@@ -39,6 +44,7 @@ static void test_headers(void) {
     CHECK_STR(get_header(&req, "host"), "localhost");
     CHECK(parse_header_line("Host: duplicate\r\n", &req) == 400);
     CHECK(parse_header_line("Content-Length: xyz\r\n", &req) == 400);
+    CHECK(parse_header_line("Content-Length: 99999999abc\r\n", &req) == 400);
     CHECK(parse_header_line("Content-Length: 1048577\r\n", &req) == 413);
     CHECK(parse_header_line("Content-Length: 1048576\r\n", &req) == 0);
     CHECK(req.content_length == MAX_BODY_LEN);
