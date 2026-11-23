@@ -59,7 +59,7 @@ www/                        정적 파일 루트
 cgi-bin/                    CGI 프로그램
 conf/routes.conf            Reverse Proxy 라우팅 규칙
 docs/plans/project-review/  리뷰 지적 사항별 수정 계획과 결과
-.github/workflows/ci.yml    push·PR마다 make(-Werror) → make test → make asan
+.github/workflows/ci.yml    push·PR마다 일반 빌드(-Werror), 단위·기능·종료 검사, sanitizer 단위 검사
 ```
 
 ## 빌드 · 실행
