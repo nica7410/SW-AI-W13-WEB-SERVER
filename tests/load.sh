@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
-# [load.sh] 부하 테스트 — 동시 연결 수에 따른 처리량(RPS)과 지연 시간 측정
-# 사용: 서버 실행 후 tests/load.sh
-set -u
+# 실행 중인 서버에 동시 접속 수를 바꿔 가며 부하를 주고 처리량·실패·최장 지연을 한 줄씩 출력한다.
+#   URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 32 64" REQUESTS=5000 KEEPALIVE=1 bash tests/load.sh
+set -eu
+url=${URL:-http://127.0.0.1:8080/index.html}
+levels=${CONCURRENCY:-1 8 32 64}
+requests=${REQUESTS:-5000}
+keepalive=${KEEPALIVE:-0}
 
-URL=${URL:-http://127.0.0.1:8080/index.html}
-
-# TODO: 동시 연결 수를 바꿔 가며 측정하고 결과를 README에 표로 기록
-#   wrk -t4 -c10  -d10s "$URL"
-#   wrk -t4 -c100 -d10s "$URL"
-#   ab -n 10000 -c 100 "$URL"
-echo "TODO: load tests against $URL"
+if command -v ab >/dev/null 2>&1; then
+    flags=(-q -s 10 -n "$requests")
+    [[ $keepalive == 1 ]] && flags+=(-k)
+    echo "ab ${flags[*]} $url"
+    for c in $levels; do
+        ab "${flags[@]}" -c "$c" "$url" 2>&1 |
+            awk -v c="$c" '/Requests per second/ {rps=$4} /Failed requests/ {fail=$3}
+                           /longest request/ {max=$2}
+                           END {printf "c=%-4s %10s req/s  failed=%s  longest=%sms\n", c, rps, fail, max}'
+    done
+elif command -v wrk >/dev/null 2>&1; then
+    for c in $levels; do
+        echo "== wrk -c$c"
+        wrk -t1 -c"$c" -d"${DURATION:-3s}" "$url"
+    done
+else
+    echo "Install Apache Bench (ab) or wrk to measure throughput and latency." >&2
+    exit 1
+fi
