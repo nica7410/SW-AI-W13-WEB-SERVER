@@ -184,6 +184,8 @@ kill "${pids[1]}"
 wait "${pids[1]}"
 unset 'pids[1]'
 expect "$(fetch -o /dev/null -w '%{http_code}' "$base/api/")" 502 unavailable
+start "$b" -r "$tmp/b"
+expect "$(fetch -f "$base/api/")" b recovery-after-refusal
 access_line() {
     grep -Fxq "access $2" "$tmp/$1.log" || { echo "missing access log: $2" >&2; exit 1; }
 }

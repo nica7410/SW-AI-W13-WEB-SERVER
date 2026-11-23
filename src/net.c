@@ -175,8 +175,9 @@ int connect_for_route(const char *host, const char *port, deadline_ms end, looku
         }
     }
     if (list) freeaddrinfo(list);
+    // 연결 거부는 다음 요청에서 재기동한 백엔드를 바로 시도할 수 있게 둔다.
     *peer_failed = fd < 0 && contacted &&
-        (error == ECONNREFUSED || error == ETIMEDOUT || error == EHOSTUNREACH ||
+        (error == ETIMEDOUT || error == EHOSTUNREACH ||
          error == ENETUNREACH || error == ECONNRESET);
     if (!deadline_left(end)) {
         if (fd >= 0) close(fd);
