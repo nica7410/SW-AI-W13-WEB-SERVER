@@ -14,18 +14,34 @@ static void make_pair(int pair[2]) {
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) { perror("socketpair"); exit(1); }
 }
 
-static ssize_t finish_and_read(int pair[2], char *out, size_t capacity) {
-    shutdown(pair[0], SHUT_WR);
+static ssize_t read_wire(int fd, char *out, size_t capacity) {
     rio_t rio;
-    rio_readinitb(&rio, pair[1]);
+    rio_readinitb(&rio, fd);
     ssize_t n = rio_readnb(&rio, out, capacity - 1);
     out[n < 0 ? 0 : n] = '\0';
     return n;
 }
 
+static ssize_t finish_and_read(int pair[2], char *out, size_t capacity) {
+    shutdown(pair[0], SHUT_WR);
+    return read_wire(pair[1], out, capacity);
+}
+
 static void close_pair(int pair[2]) {
     close(pair[0]);
     close(pair[1]);
+}
+
+struct relay_fixture {
+    int client, origin, result;
+    const http_request *req;
+};
+
+static void *relay_forward_post(void *arg) {
+    struct relay_fixture *f = arg;
+    f->result = proxy_relay(f->client, f->origin, f->req, "/x?q");
+    shutdown(f->client, SHUT_WR);
+    return NULL;
 }
 
 static void test_forward_post_and_chunked_response(void) {
@@ -45,6 +61,10 @@ static void test_forward_post_and_chunked_response(void) {
     static const char chunks[] = "3;tag=\"a;b\"\r\nx\0y\r\n0\r\nX-Sum: ok\r\n\r\n";
     // "X:" + value + CRLF exactly fills the accepted input line.
     char value[MAX_LINE - 3];
+    // The header can exceed the socket buffer. Run the relay while its peers write and read.
+    struct relay_fixture relay = {.client = client[0], .origin = origin[0], .req = &req};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, relay_forward_post, &relay)) exit(1);
     memset(value, 'v', sizeof(value) - 1);
     value[sizeof(value) - 1] = '\0';
     CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
@@ -53,30 +73,32 @@ static void test_forward_post_and_chunked_response(void) {
                              "X:%s\r\n\r\n", value) > 0);
     CHECK(rio_writen(origin[1], chunks, sizeof(chunks) - 1) > 0);
     // No shutdown from origin: only the end of the trailer section completes this reply.
-    CHECK(proxy_relay(client[0], origin[0], &req, "/x?q") == 0);
+    char response[MAX_LINE + 2048];
+    ssize_t response_size = read_wire(client[1], response, sizeof(response));
+    pthread_join(thread, NULL);
+    CHECK(relay.result == 0);
 
-    char wire[MAX_LINE + 2048];
-    ssize_t n = finish_and_read(origin, wire, sizeof(wire));
-    CHECK(strstr(wire, "POST /x?q HTTP/1.1\r\nHost: origin:81\r\n") == wire);
-    CHECK(strstr(wire, "X-Local") == NULL && strstr(wire, "old-host") == NULL);
-    CHECK(strstr(wire, "Via: 1.0 previous\r\n") && strstr(wire, "Via: 1.1 w13-proxy\r\n"));
-    CHECK(strstr(wire, "Content-Length: 3\r\n") && strstr(wire, "Connection: close\r\n"));
-    char *separator = strstr(wire, "\r\n\r\n");
-    CHECK(separator && n == separator + 4 - wire + (ssize_t)sizeof(post) &&
+    char request[512];
+    ssize_t request_size = finish_and_read(origin, request, sizeof(request));
+    CHECK(strstr(request, "POST /x?q HTTP/1.1\r\nHost: origin:81\r\n") == request);
+    CHECK(strstr(request, "X-Local") == NULL && strstr(request, "old-host") == NULL);
+    CHECK(strstr(request, "Via: 1.0 previous\r\n") && strstr(request, "Via: 1.1 w13-proxy\r\n"));
+    CHECK(strstr(request, "Content-Length: 3\r\n") && strstr(request, "Connection: close\r\n"));
+    char *separator = strstr(request, "\r\n\r\n");
+    CHECK(separator && request_size == separator + 4 - request + (ssize_t)sizeof(post) &&
           !memcmp(separator + 4, post, sizeof(post)));
 
-    n = finish_and_read(client, wire, sizeof(wire));
-    CHECK(strstr(wire, "HTTP/1.1 200 OK\r\n") == wire);
-    char *date = strstr(wire, "\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n");
+    CHECK(strstr(response, "HTTP/1.1 200 OK\r\n") == response);
+    char *date = strstr(response, "\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n");
     CHECK(date && !strstr(date + 1, "\r\nDate: "));
-    CHECK(!strstr(wire, "X-Local") && strstr(wire, "Via: 1.0 inner\r\n") &&
-          strstr(wire, "Via: 1.1 w13-proxy\r\n"));
-    const char *field = strstr(wire, "\r\nX: ");
+    CHECK(!strstr(response, "X-Local") && strstr(response, "Via: 1.0 inner\r\n") &&
+          strstr(response, "Via: 1.1 w13-proxy\r\n"));
+    const char *field = strstr(response, "\r\nX: ");
     if (field) field += strlen("\r\nX: ");
     CHECK(field && strspn(field, "v") == sizeof(value) - 1 &&
           !strncmp(field + sizeof(value) - 1, "\r\n", 2));
-    separator = strstr(wire, "\r\n\r\n");
-    CHECK(separator && n == separator + 4 - wire + (ssize_t)sizeof(chunks) - 1 &&
+    separator = strstr(response, "\r\n\r\n");
+    CHECK(separator && response_size == separator + 4 - response + (ssize_t)sizeof(chunks) - 1 &&
           !memcmp(separator + 4, chunks, sizeof(chunks) - 1));
     close_pair(client);
     close_pair(origin);
