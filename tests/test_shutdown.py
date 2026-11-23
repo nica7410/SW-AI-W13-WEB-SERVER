@@ -1,4 +1,4 @@
-"""Check SIGTERM during a finite CGI response. Run from the repository root."""
+"""Check completed CGI responses and SIGTERM. Run from the repository root."""
 import http.client
 import os
 from pathlib import Path
@@ -6,6 +6,63 @@ import socket
 import subprocess
 import tempfile
 import time
+
+
+def start_server(root):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = subprocess.Popen([os.environ.get("SERVER_BIN", "./bin/server"), "-p", str(port),
+                               "-r", root, "-g", root, "-t", "1"])
+    client = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    end = time.monotonic() + 2
+    try:
+        while True:
+            try:
+                client.connect()
+                return server, client
+            except ConnectionRefusedError:
+                if server.poll() is not None or time.monotonic() >= end:
+                    raise
+                time.sleep(0.02)
+    except BaseException:
+        client.close()
+        server.kill()
+        server.wait()
+        raise
+
+
+def test_completed_cgi_close():
+    with tempfile.TemporaryDirectory() as tmp:
+        body = b"response\n" * 131072
+        Path(tmp, "body").write_bytes(body)
+        gate = Path(tmp, "ready")
+        os.mkfifo(gate)
+        script = Path(tmp, "stream")
+        script.write_text(f"""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+print("Content-Type: text/plain\\r\\nContent-Length: {len(body)}\\r\\n\\r", flush=True)
+with open({str(gate)!r}, "rb") as ready:
+    ready.read(1)
+sys.stdout.buffer.write(Path({str(Path(tmp, "body"))!r}).read_bytes())
+""")
+        script.chmod(0o700)
+        server, client = start_server(tmp)
+        try:
+            # Holding both ends lets the test release the CGI without blocking on open().
+            with open(gate, "r+b", buffering=0) as ready, client.sock.makefile("rb") as wire:
+                client.request("GET", "/cgi-bin/stream")
+                assert wire.readline() == b"HTTP/1.1 200 OK\r\n"
+                headers = http.client.parse_headers(wire)
+                assert headers["Connection"] == "close" and int(headers["Content-Length"]) == len(body)
+                client.sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                ready.write(b"x")
+                assert wire.read() == body, "expected the complete final response followed by EOF"
+        finally:
+            client.close()
+            server.terminate()
+            server.wait(timeout=7)
 
 
 def test_shutdown():
@@ -33,22 +90,8 @@ for i in range(24):
     time.sleep(0.5)
 """ % str(Path(tmp, "observer")))
         program.chmod(0o700)
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        server = subprocess.Popen([os.environ.get("SERVER_BIN", "./bin/server"), "-p", str(port),
-                                   "-r", tmp, "-g", tmp, "-t", "1"])
-        client = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        server, client = start_server(tmp)
         try:
-            start = time.monotonic()
-            while True:
-                try:
-                    client.connect()
-                    break
-                except ConnectionRefusedError:
-                    if server.poll() is not None or time.monotonic() - start > 2:
-                        raise
-                    time.sleep(0.02)
             client.request("GET", "/cgi-bin/stream")
             response = client.getresponse()
             assert response.status == 200 and response.read(1) == b"x"
@@ -78,4 +121,5 @@ for i in range(24):
 
 
 if __name__ == "__main__":
+    test_completed_cgi_close()
     test_shutdown()

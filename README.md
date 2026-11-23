@@ -150,7 +150,7 @@ access event=overload method=- path=- status=503 outcome=complete first=- connec
 | `make test` | HTTP 요청 라인·헤더·크기 상한·헤더/본문 마감(408), MIME 매핑, 절대 URI, 최장 접두사·Round-Robin, 프록시 중계·마감, 파일 경계·CGI·TCP 오류 응답, 스레드 풀 대기 판단 |
 | `bash tests/functional.sh` | 실제 서버 5개에서 정적 파일·MIME, CGI GET/POST, keep-alive·HEAD, 동시 접속, Forward 허용 여부, Reverse 분산·장애 전환·502/504, 워커 1개 서버의 유휴 연결 양보, 큐가 넘칠 때 503 응답 전체 전달 확인 |
 | `make asan` | AddressSanitizer와 UBSan을 적용해 빌드하고 단위 테스트 실행 |
-| `python3 tests/test_shutdown.py` | SIGTERM 유예, CGI 직접 자식 회수, 같은 그룹에서 응답을 계속 쓰는 하위 프로세스 종료 확인 |
+| `python3 tests/test_shutdown.py` | 후속 요청이 대기할 때 마지막 CGI 응답의 전체 본문과 EOF, SIGTERM 유예, CGI 자식 회수와 같은 그룹의 하위 프로세스 종료 확인 |
 | `bash tests/load.sh` | 실행 중인 서버에 동시 접속 수를 바꿔 가며 요청을 보내 처리량·실패·최장 지연 측정 |
 
 기능 테스트는 `make` 후 실행하며 Bash, curl, Python 3과 연속된 빈 포트 6개가 필요합니다. 기본 포트는 18080~18085이고 `PORT=19080 bash tests/functional.sh`처럼 바꿀 수 있습니다.

@@ -35,6 +35,7 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal handler needs lock-free atomic
 // 유휴 keep-alive 연결이 이 시간보다 오래 조용하고 큐에 기다리는 연결이 있으면 워커를 양보한다
 #define IDLE_YIELD_GRACE_MS 100
 #define IDLE_POLL_SLICE_MS  50
+#define FINAL_LINGER_MS     50
 #define SHUTDOWN_GRACE_MS 5000
 
 // 큐가 가득 차 503을 보낸 연결은 클라이언트가 닫을 때까지 최대 이 수만큼 잠깐 붙잡는다
@@ -177,7 +178,8 @@ void handle_connection(int connfd) {
         int wait = wait_request_start(&rio, served > 0);
         if (wait) {
             // 양보로 닫을 때 클라이언트가 막 보낸 요청이 있으면 RST 대신 FIN을 받게 한다.
-            if (wait > 0) linger_close_input(connfd, 50);
+            if (wait > 0 || (served && atomic_load_explicit(&g_stop, memory_order_relaxed)))
+                linger_close_input(connfd, FINAL_LINGER_MS);
             break;
         }
         http_request req;
@@ -189,15 +191,16 @@ void handle_connection(int connfd) {
             if (result > 0) linger_ms = 250;
         } else {
             // 대기 중인 연결에 워커를 양보할 때는 이 응답을 마지막으로 보낸다.
-            if (req.keep_alive && others_waiting()) linger_ms = 50;
-            if (linger_ms || atomic_load_explicit(&g_stop, memory_order_relaxed)) req.keep_alive = 0;
+            if ((req.keep_alive && others_waiting()) || atomic_load_explicit(&g_stop, memory_order_relaxed))
+                req.keep_alive = 0;
             result = dispatch(connfd, &req);
         }
+        if (atomic_load_explicit(&g_stop, memory_order_relaxed)) req.keep_alive = 0;
+        if (!req.keep_alive && !linger_ms) linger_ms = FINAL_LINGER_MS;
         result = finish_request(connfd, &req, result, linger_ms);
         access_finish(&req, result);
         free_request(&req);
         if (result < 0 || !req.keep_alive) break;
-        if (atomic_load_explicit(&g_stop, memory_order_relaxed)) break;
     }
     close(connfd);
 }
