@@ -1,4 +1,4 @@
-# PR·push마다 일반 서버의 단위·기능·종료 검사 및 sanitizer 단위 검사
+# Ubuntu 통합 검사와 macOS 이식성 검사
 name: CI
 
 on:
@@ -6,11 +6,12 @@ on:
     branches: [main, dev]
   pull_request:
 
+env:
+  CFLAGS: -std=gnu11 -Wall -Wextra -Werror -g -O2
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    env:
-      CFLAGS: -std=gnu11 -Wall -Wextra -Werror -g -O2
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -23,3 +24,12 @@ jobs:
         run: python3 tests/test_shutdown.py
       - name: AddressSanitizer
         run: make asan
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make
+      - name: Unit tests
+        run: make test
