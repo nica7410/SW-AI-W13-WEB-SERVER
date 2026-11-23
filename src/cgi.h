@@ -9,5 +9,7 @@
 
 // cgi_dir 아래의 프로그램 실행. CGI는 Content-Length를 모르므로 응답 후 연결을 닫는다 (Connection: close)
 int serve_cgi(int fd, const char *cgi_dir, const http_request *req);
+// CGI client redirect destination, including an optional fragment.
+int is_cgi_redirect_uri(const char *value);
 
 #endif

@@ -6,6 +6,9 @@
 #include <netdb.h>
 
 typedef int lookup_fn(const char *, const char *, const struct addrinfo *, struct addrinfo **);
+typedef int address_connect_fn(int fd, const struct addrinfo *, deadline_ms);
+int connect_addresses(const struct addrinfo *list, deadline_ms end, address_connect_fn *attempt,
+                      int *contacted);
 typedef int connect_fn(const char *, const char *, deadline_ms, lookup_fn *, int *peer_failed);
 connect_fn connect_for_route;
 int reverse_proxy_until(int client, const http_request *req, route *r, deadline_ms end,

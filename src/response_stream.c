@@ -1,6 +1,7 @@
 #include "response_stream.h"
 #include "proxy_identity.h"
 #include "access_log.h"
+#include "cgi.h"
 #include "forward_proxy.h"
 #include "proxy.h"
 #include "upstream.h"
@@ -76,6 +77,21 @@ static int connection_field(const struct fields *f, const char *name) {
     return 0;
 }
 
+// Compact the comma-separated Trailer declaration in its original header buffer.
+static void filter_trailer_names(const struct fields *headers, char *value) {
+    char *out = value, *state;
+    for (char *name = strtok_r(value, ",", &state); name; name = strtok_r(NULL, ",", &state)) {
+        name += strspn(name, " \t");
+        size_t len = strlen(name);
+        while (len && (name[len - 1] == ' ' || name[len - 1] == '\t')) name[--len] = '\0';
+        if (!len || connection_field(headers, name)) continue;
+        if (out != value) *out++ = ',';
+        memmove(out, name, len);
+        out += len;
+    }
+    *out = '\0';
+}
+
 static int body_to_client(rio_t *rio, int client, int known_length, uintmax_t left,
                           deadline_ms end) {
     char buf[RIO_BUFSIZE];
@@ -99,7 +115,7 @@ static int write_line(int fd, deadline_ms end, const char *first, const char *se
     return send_until(fd, wire, (size_t)n, end);
 }
 
-static int chunked_body(rio_t *rio, int clientfd, struct fields *fields, deadline_ms end) {
+static int chunked_body(rio_t *rio, int clientfd, const struct fields *headers, deadline_ms end) {
     char line[MAX_LINE + 1];
     for (;;) {
         uintmax_t size;
@@ -112,17 +128,20 @@ static int chunked_body(rio_t *rio, int clientfd, struct fields *fields, deadlin
             send_until(clientfd, crlf, 2, end) < 0) return -1;
     }
     // Signal completion downstream only once the entire trailer section is valid.
-    if (read_fields(rio, fields, 0, end)) return -1;
-    for (size_t i = 0; i < fields->count; i++) {
-        const char *name = fields->items[i].name;
+    struct fields trailers;
+    if (read_fields(rio, &trailers, 0, end)) return -1;
+    for (size_t i = 0; i < trailers.count; i++) {
+        const char *name = trailers.items[i].name;
         if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding") ||
             !strcasecmp(name, "Host") || !strcasecmp(name, "Trailer") ||
-            connection_field(fields, name)) return -1;
+            connection_field(&trailers, name)) return -1;
     }
     if (write_line(clientfd, end, line, "", "") < 0) return -1;
-    for (size_t i = 0; i < fields->count; i++)
-        if (write_line(clientfd, end, fields->items[i].name, ": ", fields->items[i].value) < 0)
+    for (size_t i = 0; i < trailers.count; i++) {
+        const char *name = trailers.items[i].name;
+        if (!connection_field(headers, name) && write_line(clientfd, end, name, ": ", trailers.items[i].value) < 0)
             return -1;
+    }
     return send_until(clientfd, "\r\n", 2, end);
 }
 
@@ -209,7 +228,16 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
             reason = v;
         } else if (!strcasecmp(name, "Content-Type")) has_type = 1;
     }
-    if ((has_length && transfer_encoded) || (from_cgi && !has_type)) return error;
+    int redirect = from_cgi && !has_type;
+    if (redirect) {
+        char extra;
+        if (fields.count != 1 || strcasecmp(fields.items[0].name, "Location") ||
+            !is_cgi_redirect_uri(fields.items[0].value) ||
+            rio_readsome_until(&rio, &extra, 1, header_end) != 0) return error;
+        code = 302;
+        reason = "302 Found";
+    }
+    if (has_length && transfer_encoded) return error;
     if (code == 204 && (has_length || transfer_encoded)) return error;
 
     if (!deadline_left(header_end)) return stream_error(from_cgi);
@@ -220,6 +248,10 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         const char *name = fields.items[i].name;
         if ((from_cgi && !strcasecmp(name, "Status")) || connection_field(&fields, name))
             continue;
+        if (!from_cgi && !strcasecmp(name, "Trailer")) {
+            filter_trailer_names(&fields, fields.items[i].value);
+            if (!*fields.items[i].value) continue;
+        }
         if (!strcasecmp(name, "Date")) {
             if (sent_date) continue;
             sent_date = 1;
@@ -227,12 +259,13 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         if (write_line(clientfd, end, name, ": ", fields.items[i].value) < 0) return -1;
     }
     char date[HTTP_DATE_SIZE];
+    if (redirect && write_line(clientfd, end, "Content-Length: ", "0", "") < 0) return -1;
     if (!sent_date && received != (time_t)-1 && format_http_date(received, date) &&
         write_line(clientfd, end, "Date: ", date, "") < 0) return -1;
     if (!from_cgi && is_absolute_uri(req->uri) && write_via(clientfd, line, end) < 0) return -1;
     if (send_until(clientfd, "\r\n", 2, end) < 0) return -1;
     access_headers_sent(code);
-    if (!strcmp(req->method, "HEAD") || code == 204 || code == 304) return 0;
+    if (redirect || !strcmp(req->method, "HEAD") || code == 204 || code == 304) return 0;
     if (chunked) return chunked_body(&rio, clientfd, &fields, end);
     return body_to_client(&rio, clientfd, has_length, length, end);
 }

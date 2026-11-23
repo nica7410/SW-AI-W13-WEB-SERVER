@@ -4,6 +4,7 @@
 #include "response_stream.h"
 #include "upstream.h"
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -60,6 +61,7 @@ static void test_forward_post_and_chunked_response(void) {
     req.body = post;
 
     static const char chunks[] = "3;tag=\"a;b\"\r\nx\0y\r\n0\r\nX-Sum: ok\r\n\r\n";
+    static const char incoming[] = "3;tag=\"a;b\"\r\nx\0y\r\n0\r\nX-Local: local\r\nX-Sum: ok\r\n\r\n";
     // "X:" + value + CRLF exactly fills the accepted input line.
     char value[MAX_LINE - 3];
     // The header can exceed the socket buffer. Run the relay while its peers write and read.
@@ -73,8 +75,9 @@ static void test_forward_post_and_chunked_response(void) {
                              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                              "Via: 1.0 inner\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n"
                              "Connection: X-Local\r\nX-Local: drop\r\n"
+                             "Trailer: x-local, X-Sum\r\nTrailer: X-Local\r\n"
                              "X:%s\r\n\r\n", value) > 0);
-    CHECK(rio_writen(origin[1], chunks, sizeof(chunks) - 1) > 0);
+    CHECK(rio_writen(origin[1], incoming, sizeof(incoming) - 1) > 0);
     // No shutdown from origin: only the end of the trailer section completes this reply.
     char response[MAX_LINE + 2048];
     ssize_t response_size = read_wire(client[1], response, sizeof(response));
@@ -97,6 +100,8 @@ static void test_forward_post_and_chunked_response(void) {
     CHECK(!strncmp(response, hint, sizeof(hint) - 1));
     char *final = strstr(response, "HTTP/1.1 200 OK\r\n");
     CHECK(final == response + sizeof(hint) - 1);
+    const char *declaration = strstr(response, "\r\nTrailer: X-Sum\r\n");
+    CHECK(declaration && !strstr(declaration + 2, "\r\nTrailer:"));
     char *date = strstr(response, "\r\nDate: Wed, 01 Jan 2020 00:00:00 GMT\r\n");
     CHECK(date && !strstr(date + 1, "\r\nDate: "));
     CHECK(!strstr(response, "X-Local") && strstr(response, "Via: 1.0 inner\r\n") &&
@@ -121,14 +126,19 @@ static void check_response(int from_cgi, const char *input, int expected) {
     CHECK(rio_writen(source[1], input, strlen(input)) == (ssize_t)strlen(input));
     shutdown(source[1], SHUT_WR);
     deadline_ms end = deadline_after(1000);
-    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) == expected);
+    CHECK(response_until(client[0], source[0], &req, from_cgi, end, end) ==
+          (expected >= 400 ? expected : 0));
     char wire[512];
     ssize_t n = finish_and_read(client, wire, sizeof(wire));
-    if (expected) {
+    if (expected >= 400) {
         CHECK(n == 0);
     } else {
         const char *body = strstr(wire, "\r\n\r\n");
-        CHECK(strstr(wire, "HTTP/1.1 204 No Content\r\n") == wire);
+        if (expected == 302) {
+            CHECK(strstr(wire, "HTTP/1.1 302 Found\r\n") == wire);
+            CHECK(strstr(wire, "\r\nLocation: https://example.org/a%20b?q=1#part\r\n"));
+            CHECK(strstr(wire, "\r\nContent-Length: 0\r\n"));
+        } else CHECK(strstr(wire, "HTTP/1.1 204 No Content\r\n") == wire);
         CHECK(body && body + 4 - wire == n);
     }
     close_pair(source);
@@ -186,6 +196,37 @@ static void test_total_response_deadline(void) {
 
 static int connect_calls, healthy_fd;
 static deadline_ms request_end;
+
+static int timed_address_attempt(int fd, const struct addrinfo *a, deadline_ms end) {
+    connect_calls++;
+    if (a->ai_next) {
+        CHECK(end < request_end);
+        poll(NULL, 0, deadline_left(end));
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    CHECK(end == request_end && deadline_left(end) > 0);
+    return connect(fd, a->ai_addr, a->ai_addrlen);
+}
+
+static void test_address_failover(void) {
+    int listener = open_listenfd("0");
+    require(listener >= 0, "listen");
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    require(getsockname(listener, (struct sockaddr *)&addr, &len) == 0, "listener address");
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    struct addrinfo second = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM,
+                              .ai_addr = (struct sockaddr *)&addr, .ai_addrlen = len};
+    struct addrinfo first = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM, .ai_next = &second};
+    request_end = deadline_after(250);
+    int contacted;
+    connect_calls = 0;
+    int fd = connect_addresses(&first, request_end, timed_address_attempt, &contacted);
+    CHECK(fd >= 0 && contacted && connect_calls == 2);
+    if (fd >= 0) close(fd);
+    close(listener);
+}
 
 static int connect_origin(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
                           int *peer_failed) {
@@ -393,10 +434,13 @@ int main(void) {
     check_response(0, "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n", 502);
     check_response(1, "Content-Type: text/plain\r\nContent-Length: 0\r\nStatus: 204\r\n\r\n", 500);
     check_response(1, "Content-Type: text/plain\r\nStatus: 200 OK\r\nsTaTuS: 200 OK\r\n\r\n", 500);
-    check_response(0, "HTTP/1.1 204 No Content\r\n\r\n", 0);
+    check_response(0, "HTTP/1.1 204 No Content\r\n\r\n", 204);
+    check_response(1, "Location: https://example.org/a%20b?q=1#part\r\n\r\n", 302);
+    check_response(1, "Location: /local\r\n\r\n", 500);
     test_truncated_chunk();
     test_total_response_deadline();
     test_connection_failover();
+    test_address_failover();
     test_via_reentry();
     test_cooldown_recovery();
     test_deadline();

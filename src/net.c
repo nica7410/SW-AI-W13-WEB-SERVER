@@ -157,6 +157,28 @@ static int connect_address(int fd, const struct addrinfo *a, deadline_ms end) {
     return fcntl(fd, F_SETFL, flags);
 }
 
+int connect_addresses(const struct addrinfo *list, deadline_ms end, address_connect_fn *attempt,
+                      int *contacted) {
+    int64_t remaining = 0;
+    for (const struct addrinfo *a = list; a; a = a->ai_next) remaining++;
+    *contacted = 0;
+    int error = ETIMEDOUT;
+    for (const struct addrinfo *a = list; a; a = a->ai_next, remaining--) {
+        deadline_ms limit = effective_deadline(end);
+        deadline_ms now = deadline_after(0);
+        if (now >= limit) { error = ETIMEDOUT; break; }
+        deadline_ms share = (limit - now) / remaining;
+        int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (fd < 0) { error = errno; continue; }
+        *contacted = 1;
+        if (attempt(fd, a, now + (share ? share : 1)) == 0) return fd;
+        error = errno;
+        close(fd);
+    }
+    errno = error;
+    return -1;
+}
+
 int connect_for_route(const char *host, const char *port, deadline_ms end, lookup_fn *lookup,
                       int *peer_failed) {
     *peer_failed = 0;
@@ -166,18 +188,8 @@ int connect_for_route(const char *host, const char *port, deadline_ms end, looku
     int error = resolve_until(host, port, end, lookup, &list, &contacted);
     int fd = -1;
     if (!error) {
-        // 조회 성공 뒤 연결을 시도하기 전에 예산이 끝나면 목적지 실패로 세지 않는다.
-        contacted = 0;
-        error = ETIMEDOUT;
-        for (struct addrinfo *a = list; a && deadline_left(end); a = a->ai_next) {
-            fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-            if (fd < 0) { error = errno; continue; }
-            contacted = 1;
-            if (connect_address(fd, a, end) == 0) break;
-            error = errno;
-            close(fd);
-            fd = -1;
-        }
+        fd = connect_addresses(list, end, connect_address, &contacted);
+        if (fd < 0) error = errno;
     }
     if (list) freeaddrinfo(list);
     // 연결 거부는 다음 요청에서 재기동한 백엔드를 바로 시도할 수 있게 둔다.
