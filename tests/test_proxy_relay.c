@@ -95,6 +95,51 @@ static void test_truncated_chunk(void) {
     close_pair(origin);
 }
 
+static int connect_calls, healthy_fd;
+static deadline_ms request_end;
+
+static int connect_candidate(const char *host, const char *port, deadline_ms end, lookup_fn *lookup) {
+    (void)port;
+    (void)lookup;
+    if (++connect_calls == 1) {
+        CHECK_STR(host, "first");
+        CHECK(end < request_end && deadline_left(end) > 0);
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    CHECK_STR(host, "second");
+    CHECK(end == request_end);
+    return healthy_fd;
+}
+
+static void test_connection_failover(void) {
+    int client[2], origin[2];
+    make_pair(client);
+    make_pair(origin);
+    healthy_fd = origin[0];
+    route r;
+    CHECK(parse_route_line("/api/ first:80 second:80", &r) == 1);
+    http_request req = {0};
+    CHECK(parse_request_line("POST /api/ HTTP/1.1\r\n", &req) == 0);
+    CHECK(parse_header_line("Content-Length: 1\r\n", &req) == 0);
+    req.body = "x";
+    CHECK(dprintf(origin[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") > 0);
+    request_end = deadline_after(1000);
+    CHECK(reverse_proxy_until(client[0], &req, &r, request_end, connect_candidate) == 0);
+    CHECK(connect_calls == 2);
+    char wire[512];
+    rio_t rio;
+    rio_readinitb(&rio, origin[1]);
+    ssize_t n = rio_readnb(&rio, wire, sizeof(wire) - 1);
+    wire[n > 0 ? n : 0] = '\0';
+    CHECK(strstr(wire, "POST /api/ ") == wire && !strstr(wire + 1, "POST "));
+    CHECK(strstr(wire, "\r\n\r\nx") != NULL);
+    finish_and_read(client, wire, sizeof(wire));
+    CHECK(strstr(wire, "HTTP/1.1 200 OK") == wire && strstr(wire, "\r\n\r\nok"));
+    close(origin[1]);
+    close_pair(client);
+}
+
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static pthread_key_t resolver_key;
@@ -162,6 +207,7 @@ int main(void) {
     alarm(8);
     test_forward_post_and_chunked_response();
     test_truncated_chunk();
+    test_connection_failover();
     test_deadline();
     return TEST_RESULT();
 }

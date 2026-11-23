@@ -74,14 +74,18 @@ int proxy_relay(int clientfd, int upstreamfd, const http_request *req, const cha
     return relay_until(clientfd, upstreamfd, req, target, deadline_after(PROXY_TIMEOUT_SEC * 1000));
 }
 
-int reverse_proxy_request(int clientfd, const http_request *req, route *r) {
-    deadline_ms end = deadline_after(PROXY_TIMEOUT_SEC * 1000);
+int reverse_proxy_until(int clientfd, const http_request *req, route *r, deadline_ms end,
+                        connect_fn *connect_backend) {
     const backend *first = next_backend(r);
     if (!first) return 502;
     int start = (int)(first - r->backends), error = 502;
     for (int i = 0; i < r->backend_count; i++) {
         const backend *b = &r->backends[(start + i) % r->backend_count];
-        int upstream = connect_until(b->host, b->port, end, getaddrinfo);
+        int left = deadline_left(end);
+        if (!left) return 504;
+        int share = left / (r->backend_count - i);
+        deadline_ms attempt_end = end - left + (share ? share : 1);
+        int upstream = connect_backend(b->host, b->port, attempt_end, getaddrinfo);
         if (upstream < 0) {
             if (errno == ETIMEDOUT) error = 504;
             if (!deadline_left(end)) return 504;
@@ -93,4 +97,9 @@ int reverse_proxy_request(int clientfd, const http_request *req, route *r) {
         return status;
     }
     return error;
+}
+
+int reverse_proxy_request(int clientfd, const http_request *req, route *r) {
+    return reverse_proxy_until(clientfd, req, r, deadline_after(PROXY_TIMEOUT_SEC * 1000),
+                               connect_until);
 }
