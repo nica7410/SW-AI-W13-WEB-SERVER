@@ -128,15 +128,15 @@ curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
 `./bin/server -c conf/routes.conf -v`로 실행하면 다음과 같은 로그가 출력됩니다. `first`는 처음 연결을 시도한 백엔드, `connected`는 연결에 성공한 백엔드입니다. 세 번째 줄에서는 8001번 연결에 실패해 8002번에서 응답을 받았습니다.
 
 ```text
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8001 attempts=1 duration_ms=1
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8002 connected=127.0.0.1:8002 attempts=1 duration_ms=0
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8002 attempts=2 duration_ms=2501
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8001 attempts=1 duration_ms=1 request_read_ms=0
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8002 connected=127.0.0.1:8002 attempts=1 duration_ms=0 request_read_ms=0
+access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8002 attempts=2 duration_ms=2501 request_read_ms=0
 access event=overload method=- path=- status=503 outcome=complete first=- connected=- attempts=0 duration_ms=0
 ```
 
 큐가 가득 차면 요청을 읽기 전에 503을 보내므로 메서드와 경로가 `-`로 표시됩니다. 중간에 전송이 끊기면 `outcome=aborted`가 남습니다. 그때 `status=-`이면 최종 헤더를 다 보내기 전이고, `status=200`이면 200 헤더를 보낸 뒤입니다. 경로에서 쿼리를 빼고 본문과 요청 헤더도 생략합니다.
 
-`duration_ms`는 요청 읽기가 끝난 시점부터 응답 처리와 정리를 마치고 로그를 쓰기 직전까지의 밀리초입니다. 큐 초과 거절은 503 전송을 시도한 구간만 잽니다.
+`request_read_ms`는 첫 바이트가 준비된 뒤 요청 라인·헤더·본문을 읽고 파싱하는 데 걸린 밀리초입니다. 큐 대기와 다음 요청의 첫 바이트를 기다린 시간은 제외합니다. `duration_ms`는 요청 읽기가 끝난 시점부터 응답 처리와 정리를 마치고 로그를 쓰기 직전까지의 밀리초입니다. 큐 초과로 요청을 읽기 전에 거절하면 503 전송을 시도한 `duration_ms`만 기록합니다.
 
 ## 검증
 
@@ -158,13 +158,20 @@ access event=overload method=- path=- status=503 outcome=complete first=- connec
 
 sanitizer 서버와 CGI로 기능 테스트를 실행하려면 `SERVER_BIN=./bin/asan/server CGI_DIR=./bin/asan/cgi-bin bash tests/functional.sh`를 사용합니다. 일반 실행 파일은 `bin/server`와 `cgi-bin/adder`에 있습니다.
 
-부하 스크립트는 `ab`(없으면 `wrk`)를 사용합니다. `URL`, `CONCURRENCY`(공백으로 구분한 목록), `REQUESTS`, `KEEPALIVE=1`로 조건을 바꿉니다.
+부하 스크립트는 `ab`를 먼저 선택하고, 설치되어 있지 않으면 `wrk`를 사용합니다. 두 도구 모두 `URL`과 `CONCURRENCY`(공백으로 구분한 동시 연결 수 목록)를 읽습니다.
+
+| 도구 | 동시 연결 수 하나당 측정 조건 |
+|---|---|
+| `ab` | `REQUESTS`건을 보냅니다(기본 5,000건). `KEEPALIVE=1`이면 `-k`로 연결을 재사용합니다. |
+| `wrk` | 스레드 하나로 `DURATION` 동안 실행합니다(기본 3초). 연결 재사용은 도구의 기본 동작을 따르며 이 분기는 `REQUESTS`와 `KEEPALIVE`를 읽지 않습니다. |
 
 `ab` 요약의 `failed`는 연결·읽기·응답 길이 등의 실패 수이고, `non_2xx`는 HTTP 상태가 2xx 범위 밖인 응답 수입니다. 503 응답의 길이까지 달라지면 같은 요청이 두 지표에 모두 포함됩니다. 도구 실행이 실패하거나 필수 지표가 누락되면 스크립트는 오류로 종료합니다.
 
 ```bash
-URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 32 64 100 256" bash tests/load.sh
-URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8 9 32 64 100 256" KEEPALIVE=1 bash tests/load.sh
+# ab가 설치된 환경
+URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8" REQUESTS=5000 KEEPALIVE=1 bash tests/load.sh
+# wrk만 설치된 환경
+URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8" DURATION=3s bash tests/load.sh
 ```
 
 ### 부하 측정 결과 (13~18번 반영 후, 커밋 전 작업 트리)

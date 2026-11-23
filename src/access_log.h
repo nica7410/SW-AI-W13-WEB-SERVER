@@ -2,9 +2,11 @@
 #define ACCESS_LOG_H
 
 #include "http_request.h"
+#include "deadline.h"
 #include "router.h"
 
-void access_begin(void);
+// read_started is the monotonic timestamp before read_request(), or -1 for overload.
+void access_begin(deadline_ms read_started);
 void access_attempt(const backend *candidate);
 void access_connected(const backend *selected);
 void access_headers_sent(int status);

@@ -198,8 +198,10 @@ expect "$(fetch -f "$base/api/")" b recovery-after-refusal
 access_line() {
     awk -v prefix="access $2 duration_ms=" -v min_ms="${3:-0}" '
         index($0, prefix) == 1 {
-            ms = substr($0, length(prefix) + 1)
-            if (ms ~ /^[0-9]+$/ && ms + 0 >= min_ms) found = 1
+            n = split(substr($0, length(prefix) + 1), timing, " ")
+            if (timing[1] !~ /^[0-9]+$/ || timing[1] + 0 < min_ms) next
+            if ($2 == "event=request" && n == 2 && timing[2] ~ /^request_read_ms=[0-9]+$/) found = 1
+            if ($2 == "event=overload" && n == 1) found = 1
         }
         END { exit !found }
     ' "$tmp/$1.log" || { echo "missing access log: $2 (minimum ${3:-0} ms)" >&2; exit 1; }

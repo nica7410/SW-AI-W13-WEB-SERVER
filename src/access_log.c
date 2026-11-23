@@ -7,13 +7,14 @@
 // 각 워커는 요청 하나를 동기적으로 처리한다. 수락 스레드의 503 기록도 독립적이다.
 struct access_record {
     int active, status, attempts;
-    deadline_ms started;
+    deadline_ms started, read_ms;
     const backend *first, *connected;
 };
 static _Thread_local struct access_record record;
 
-void access_begin(void) {
+void access_begin(deadline_ms read_started) {
     record = (struct access_record){.active = 1, .started = deadline_after(0)};
+    if (read_started >= 0) record.read_ms = record.started - read_started;
 }
 
 void access_attempt(const backend *candidate) {
@@ -63,8 +64,10 @@ void access_finish(const http_request *req, int result) {
     format_endpoint(record.connected, connected, sizeof(connected));
     format_path(req && *req->path ? req->path : "-", path, sizeof(path));
     if (record.status) snprintf(status, sizeof(status), "%d", record.status);
+    char read_field[48] = "";
+    if (req) snprintf(read_field, sizeof(read_field), " request_read_ms=%" PRId64, record.read_ms);
     fprintf(stderr, "access event=%s method=%s path=%s status=%s outcome=%s "
-                    "first=%s connected=%s attempts=%d duration_ms=%" PRId64 "\n",
+                    "first=%s connected=%s attempts=%d duration_ms=%" PRId64 "%s\n",
             req ? "request" : "overload", req && *req->method ? req->method : "-", path,
-            status, result == 0 ? "complete" : "aborted", first, connected, record.attempts, duration);
+            status, result == 0 ? "complete" : "aborted", first, connected, record.attempts, duration, read_field);
 }

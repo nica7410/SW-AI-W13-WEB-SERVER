@@ -183,8 +183,9 @@ void handle_connection(int connfd) {
             break;
         }
         http_request req;
+        deadline_ms read_started = g_cfg && g_cfg->verbose ? deadline_after(0) : -1;
         int result = read_request(&rio, &req);
-        if (g_cfg && g_cfg->verbose && (result >= 0 || *req.method)) access_begin();
+        if (read_started >= 0 && (result >= 0 || *req.method)) access_begin(read_started);
         int linger_ms = 0;
         if (result) {
             req.keep_alive = 0;
@@ -282,7 +283,7 @@ int run_server(const server_config *cfg) {
         } else if (threadpool_submit(pool, fd) < 0) {
             // 요청을 읽지 않은 채 바로 close하면 RST가 503 응답을 앞질러 클라이언트가 응답을 잃는다.
             // 송신만 닫고, 클라이언트가 닫을 때까지 accept 루프가 입력을 버리다가 close한다.
-            if (cfg->verbose) access_begin();
+            if (cfg->verbose) access_begin(-1);
             int sent = send_error(fd, 503, 0);
             access_finish(NULL, sent);
             if (sent < 0 || nfds == 1 + MAX_REJECTED || shutdown(fd, SHUT_WR) < 0) {
