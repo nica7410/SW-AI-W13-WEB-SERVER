@@ -1,0 +1,1145 @@
+<title>W13 웹서버 구현 해설</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* 레이아웃: 한 줄 본문(최대 1040px) + 상단 고정 목차. 다이어그램·표는 각자 가로 스크롤 상자 안에 둔다 */
+:root {
+  --bg: #F1F4F6;
+  --surface: #FFFFFF;
+  --surface-2: #E6ECEF;
+  --ink: #13212B;
+  --muted: #55677A;
+  --line: #D2DBE1;
+  --accent: #0D6787;
+  --accent-soft: #D9ECF3;
+  --amber: #9E5B07;
+  --amber-soft: #FAEAD2;
+  --red: #AE352C;
+  --red-soft: #F8DFDB;
+  --green: #276E42;
+  --green-soft: #DAEEE1;
+  --violet: #5443A9;
+  --violet-soft: #E6E2F7;
+  --font-display: 'Space Grotesk', 'IBM Plex Sans KR', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans KR', system-ui, -apple-system, 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Consolas, 'D2Coding', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0D151A; --surface: #142028; --surface-2: #1B2A33; --ink: #E2EBEF; --muted: #93A6B2; --line: #283A44;
+    --accent: #5CB6D8; --accent-soft: #14323F; --amber: #E3A24A; --amber-soft: #382812;
+    --red: #EE8A80; --red-soft: #3A1B18; --green: #6CC891; --green-soft: #142E1F;
+    --violet: #A99CF0; --violet-soft: #251F44; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0D151A; --surface: #142028; --surface-2: #1B2A33; --ink: #E2EBEF; --muted: #93A6B2; --line: #283A44;
+  --accent: #5CB6D8; --accent-soft: #14323F; --amber: #E3A24A; --amber-soft: #382812;
+  --red: #EE8A80; --red-soft: #3A1B18; --green: #6CC891; --green-soft: #142E1F;
+  --violet: #A99CF0; --violet-soft: #251F44; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 15.5px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 64px;
+  word-break: keep-all; overflow-wrap: break-word;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.wrap { max-width: 1040px; margin: 0 auto; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.25; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 46px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: clamp(23px, 3.2vw, 30px); font-weight: 700; }
+h3 { font-size: 18px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.muted { color: var(--muted); }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+
+/* 머리말 */
+.hero { padding-block: 48px 28px; display: grid; gap: 18px; }
+.hero .lede { font-size: 17.5px; color: var(--muted); max-width: 62ch; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.stat { border-top: 2px solid var(--ink); padding-top: 10px; }
+.stat b { display: block; font-family: var(--font-display); font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.stat span { font-size: 13px; color: var(--muted); }
+@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 고정 목차 */
+nav.toc {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg);
+  border-bottom: 1px solid var(--line); margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px)));
+  padding-inline: max(16px, env(safe-area-inset-left, 0px));
+}
+nav.toc .inner { max-width: 1040px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto; padding-block: 8px; scrollbar-width: thin; }
+nav.toc a { flex: none; text-decoration: none; color: var(--muted); font-size: 13.5px; padding: 5px 10px; border-radius: 999px; white-space: nowrap; }
+nav.toc a:hover { background: var(--surface-2); color: var(--ink); }
+
+section { padding-block: 56px 8px; display: grid; gap: 18px; scroll-margin-top: 56px; }
+section > header { display: grid; gap: 8px; }
+.sub { display: grid; gap: 14px; margin-top: 10px; }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; min-width: 0; }
+.scroll { overflow-x: auto; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 820px) { .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); } }
+
+.note { border-left: 3px solid var(--amber); background: var(--amber-soft); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14.5px; max-width: 80ch; }
+.note b { color: var(--amber); }
+
+/* 비유 표 */
+.analogy { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.analogy div { padding: 14px; border-right: 1px solid var(--line); display: grid; gap: 4px; align-content: start; }
+.analogy div:last-child { border-right: 0; }
+.analogy .k { font-size: 12px; color: var(--muted); }
+.analogy .v { font-weight: 600; }
+.analogy .c { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent); }
+@media (max-width: 720px) { .analogy { grid-template-columns: repeat(2, minmax(0, 1fr)); } .analogy div:nth-child(2) { border-right: 0; } .analogy div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
+
+/* 기술 스택 */
+.stack-card { display: grid; gap: 10px; align-content: start; }
+.stack-card h3 { display: flex; align-items: center; gap: 8px; }
+.dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-family: var(--font-mono); font-size: 12.5px; padding: 2px 8px; border-radius: 5px; background: var(--surface-2); color: var(--ink); white-space: nowrap; }
+.stack-card p { font-size: 14px; color: var(--muted); }
+
+/* 계층 다이어그램 */
+.layers { display: grid; gap: 0; min-width: 640px; }
+.layer { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; align-items: center; padding: 12px 0; }
+.layer + .layer { border-top: 1px dashed var(--line); }
+.layer .name { font-size: 13px; font-weight: 600; color: var(--muted); display: grid; gap: 2px; }
+.layer .name small { font-weight: 400; font-size: 12px; }
+.mods { display: flex; flex-wrap: wrap; gap: 8px; }
+.mod { border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; background: var(--surface); display: grid; gap: 1px; min-width: 120px; }
+.mod b { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.mod span { font-size: 12px; color: var(--muted); }
+.mod.k-net { border-color: var(--accent); background: var(--accent-soft); }
+.mod.k-conc { border-color: var(--green); background: var(--green-soft); }
+.mod.k-http { border-color: var(--amber); background: var(--amber-soft); }
+.mod.k-proc { border-color: var(--violet); background: var(--violet-soft); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+/* 요청 여정 */
+.journey { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; counter-reset: step; }
+.journey li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 14px; position: relative; padding-bottom: 18px; }
+.journey li::before { counter-increment: step; content: counter(step); width: 30px; height: 30px; border-radius: 50%; background: var(--ink); color: var(--bg); font-family: var(--font-display); font-weight: 700; display: grid; place-items: center; font-size: 14px; z-index: 1; }
+.journey li:not(:last-child)::after { content: ""; position: absolute; left: 14px; top: 30px; bottom: 0; width: 2px; background: var(--line); }
+.journey .body { display: grid; gap: 3px; padding-top: 3px; }
+.journey .body b { font-weight: 600; }
+.journey .fn { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent); }
+.journey .body p { font-size: 14.5px; color: var(--muted); }
+
+/* 분기 시뮬레이터 */
+.sim { display: grid; gap: 14px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.controls label { font-size: 13.5px; display: inline-flex; align-items: center; gap: 6px; }
+input[type="text"], select { font-family: var(--font-mono); font-size: 14px; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); min-width: 0; }
+#uri { flex: 1 1 260px; }
+button { font-family: var(--font-body); font-size: 13.5px; font-weight: 500; padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.small { font-size: 12.5px; padding: 4px 9px; font-family: var(--font-mono); }
+.examples { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+.checks { display: grid; gap: 6px; }
+.check { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; align-items: center; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); font-size: 14px; }
+.check .st { font-family: var(--font-mono); font-size: 12px; font-weight: 600; text-align: center; border-radius: 5px; padding: 2px 0; }
+.check.yes { border-color: var(--green); }
+.check.yes .st { background: var(--green-soft); color: var(--green); }
+.check.no .st { background: var(--surface-2); color: var(--muted); }
+.check.skip { opacity: 0.45; }
+.check.skip .st { background: transparent; color: var(--muted); }
+.result { border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; border: 2px solid var(--accent); background: var(--accent-soft); }
+.result.bad { border-color: var(--red); background: var(--red-soft); }
+.result b { font-family: var(--font-display); font-size: 19px; }
+.result .fn { font-family: var(--font-mono); font-size: 13px; }
+
+/* 스레드 풀 시뮬레이터 */
+.pool { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; }
+@media (max-width: 760px) { .pool { grid-template-columns: minmax(0, 1fr); } }
+.lane-title { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; margin-bottom: 6px; }
+.ring { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; }
+.slot { height: 40px; border: 1px dashed var(--line); border-radius: 6px; display: grid; place-items: center; font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+.slot.full { border: 1px solid var(--amber); background: var(--amber-soft); color: var(--amber); font-weight: 600; }
+.workers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.worker { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; display: grid; gap: 2px; transition: background .2s; }
+.worker .w { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.worker .s { font-weight: 600; font-size: 14px; }
+.worker.idle .s { color: var(--muted); }
+.worker.busy { border-color: var(--green); background: var(--green-soft); }
+.worker.busy .s { color: var(--green); }
+.worker.ka { border-color: var(--accent); background: var(--accent-soft); }
+.worker.ka .s { color: var(--accent); }
+.meter { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.meter b { color: var(--ink); font-family: var(--font-mono); }
+.logbox { font-family: var(--font-mono); font-size: 12.5px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; height: 168px; overflow-y: auto; display: grid; align-content: start; gap: 2px; }
+.logbox .r { color: var(--red); }
+.logbox .y { color: var(--accent); }
+.logbox .g { color: var(--green); }
+.flag { font-family: var(--font-mono); font-size: 12.5px; padding: 3px 8px; border-radius: 5px; background: var(--surface-2); }
+.flag.on { background: var(--amber-soft); color: var(--amber); font-weight: 600; }
+input[type="range"] { accent-color: var(--accent); }
+
+/* linger 비교 */
+.wire { display: grid; gap: 10px; }
+.wire-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: center; }
+.wire-row .lbl { font-size: 13.5px; font-weight: 600; }
+.pkts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pkt { font-family: var(--font-mono); font-size: 12px; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface); white-space: nowrap; }
+.pkt.ok { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+.pkt.bad { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+.pkt.info { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.arr { color: var(--muted); font-size: 13px; }
+@media (max-width: 560px) { .wire-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+
+/* SVG 공통 */
+svg text { font-family: var(--font-body); }
+svg .t-mono { font-family: var(--font-mono); }
+
+/* 요청 해부 */
+.anatomy { font-family: var(--font-mono); font-size: 13.5px; display: grid; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 560px; }
+.anatomy .row { display: grid; grid-template-columns: minmax(0, 1fr) 260px; }
+.anatomy .row + .row { border-top: 1px solid var(--line); }
+.anatomy .src { padding: 8px 12px; white-space: pre; background: var(--surface); }
+.anatomy .ann { padding: 8px 12px; font-family: var(--font-body); font-size: 13px; background: var(--surface-2); display: grid; gap: 3px; }
+.badge { display: inline-block; font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--red-soft); color: var(--red); margin-right: 4px; }
+.badge.ok { background: var(--green-soft); color: var(--green); }
+.badge.info { background: var(--accent-soft); color: var(--accent); }
+.anatomy .hl-line { color: var(--accent); }
+.anatomy .hl-head { color: var(--amber); }
+.anatomy .hl-body { color: var(--violet); }
+
+/* 경로 보안 깔때기 */
+.funnel { display: grid; gap: 6px; }
+.fstep { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: center; padding: 11px 14px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+.fstep .what { display: grid; gap: 2px; }
+.fstep .what b { font-size: 14.5px; }
+.fstep .what code { font-size: 12px; }
+.fstep .blocks { font-size: 13px; color: var(--muted); }
+.fstep .blocks .badge { margin-right: 6px; }
+@media (max-width: 600px) { .fstep { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+
+/* CGI 스윔레인 */
+.swim { display: grid; grid-template-columns: minmax(0, 1fr) 46px minmax(0, 1fr); gap: 8px 6px; min-width: 620px; }
+.swim .head { font-family: var(--font-display); font-weight: 700; font-size: 15px; padding: 8px 12px; border-radius: 8px; text-align: center; }
+.swim .head.p { background: var(--accent-soft); color: var(--accent); }
+.swim .head.c { background: var(--violet-soft); color: var(--violet); }
+.swim .cell { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); font-size: 13.5px; display: grid; gap: 2px; }
+.swim .cell code { font-size: 12px; }
+.swim .cell.empty { border: 0; background: none; }
+.swim .mid { display: grid; place-items: center; color: var(--muted); font-size: 18px; }
+
+/* 표 */
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+/* 프록시 시뮬레이터 */
+.backs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 560px) { .backs { grid-template-columns: minmax(0, 1fr); } }
+.back { border: 1px solid var(--line); border-radius: 9px; padding: 12px; display: grid; gap: 8px; }
+.back .bname { font-family: var(--font-mono); font-weight: 600; font-size: 14px; }
+.back .bstate { font-size: 13px; }
+.back.cool { border-color: var(--amber); background: var(--amber-soft); }
+.back.last { box-shadow: 0 0 0 2px var(--accent) inset; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex-wrap: wrap; }
+.seg button { border: 0; border-radius: 0; font-size: 12.5px; padding: 5px 9px; background: var(--surface); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+
+/* 헤더 diff */
+.diff { font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 520px; }
+.diff div { padding: 4px 12px; white-space: pre; }
+.diff .hd { background: var(--surface-2); font-family: var(--font-body); font-size: 12.5px; color: var(--muted); font-weight: 600; padding: 7px 12px; }
+.diff .del { background: var(--red-soft); color: var(--red); }
+.diff .add { background: var(--green-soft); color: var(--green); }
+.diff .keep { background: var(--surface); }
+
+/* 종료 타임라인 */
+.tl { display: grid; gap: 0; }
+.tl-item { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 14px; padding: 10px 0; border-top: 1px solid var(--line); }
+.tl-item:first-child { border-top: 0; }
+.tl-item .when { font-family: var(--font-mono); font-size: 12.5px; color: var(--amber); font-weight: 600; padding-top: 2px; }
+.tl-item .what { font-size: 14px; display: grid; gap: 2px; }
+.tl-item .what span { color: var(--muted); font-size: 13.5px; }
+
+/* 반환 규약 */
+.ret { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .ret { grid-template-columns: minmax(0, 1fr); } }
+.ret div { border-radius: 9px; padding: 14px; display: grid; gap: 6px; border: 1px solid var(--line); background: var(--surface); }
+.ret .v { font-family: var(--font-mono); font-size: 24px; font-weight: 600; }
+.ret .ok .v { color: var(--green); }
+.ret .st .v { color: var(--amber); }
+.ret .cl .v { color: var(--red); }
+.ret p { font-size: 13.5px; color: var(--muted); }
+
+/* fd 예산 막대 */
+.budget { display: flex; height: 34px; border-radius: 7px; overflow: hidden; border: 1px solid var(--line); font-size: 12px; font-family: var(--font-mono); }
+.budget div { display: grid; place-items: center; color: var(--ink); white-space: nowrap; overflow: hidden; }
+
+/* 빌드 */
+.build { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 640px) { .build { grid-template-columns: minmax(0, 1fr); } }
+.tree { font-family: var(--font-mono); font-size: 13px; white-space: pre; line-height: 1.6; background: var(--bg); border-radius: 8px; padding: 10px 12px; border: 1px solid var(--line); overflow-x: auto; }
+
+footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+html { scroll-behavior: smooth; }
+</style>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="eyebrow">SW-AI WEEK 13 · C · POSIX</div>
+    <h1>W13 웹서버 구현 해설</h1>
+    <p class="lede">외부 HTTP 라이브러리 없이 운영체제가 주는 기본 함수(소켓, 스레드, 프로세스)만으로 만든 C 웹서버입니다. 정적 파일과 CGI 프로그램을 직접 제공하고, 설정에 따라 Reverse Proxy와 Forward Proxy로도 동작합니다. 이 문서는 어떤 부품으로 어떻게 조립했는지를 그림과 함께 풀어 씁니다.</p>
+    <div class="stats">
+      <div class="stat"><b>0</b><span>외부 라이브러리 (표준 C + POSIX만 사용)</span></div>
+      <div class="stat"><b>20</b><span><code>src/</code>의 C 소스 파일 (약 2,700줄)</span></div>
+      <div class="stat"><b>8 / 1024</b><span>기본 워커 스레드 수 / 연결 대기 큐 크기</span></div>
+      <div class="stat"><b>7 + 4</b><span>C 단위 테스트 / 기능·종료·부하 스크립트</span></div>
+    </div>
+  </header>
+
+  <nav class="toc" aria-label="목차">
+    <div class="inner">
+      <a href="#overview">한눈에</a>
+      <a href="#stack">사용한 기술</a>
+      <a href="#arch">아키텍처</a>
+      <a href="#journey">요청의 여정</a>
+      <a href="#pool">스레드 풀</a>
+      <a href="#time">시간 예산</a>
+      <a href="#http">HTTP 파싱</a>
+      <a href="#static">정적 파일</a>
+      <a href="#cgi">CGI</a>
+      <a href="#proxy">프록시</a>
+      <a href="#ops">과부하·종료</a>
+      <a href="#verify">빌드·검증</a>
+    </div>
+  </nav>
+
+  <!-- 한눈에 -->
+  <section id="overview">
+    <header>
+      <div class="eyebrow">한눈에 보기</div>
+      <h2>식당에 비유하면</h2>
+      <p>웹서버의 구조는 손님을 받는 식당과 비슷합니다. 접수 창구 한 곳이 손님을 받아 번호표를 주고, 정해진 수의 요리사가 번호 순서대로 손님을 맡습니다. 각 칸의 아래 줄은 그 역할을 맡은 실제 함수입니다.</p>
+    </header>
+    <div class="analogy">
+      <div><span class="k">접수 창구</span><span class="v">손님(연결)을 받는다</span><span class="c">run_server · accept()</span></div>
+      <div><span class="k">번호표 대기줄</span><span class="v">요리사가 빌 때까지 기다린다</span><span class="c">threadpool 링 버퍼</span></div>
+      <div><span class="k">요리사 8명</span><span class="v">손님 한 명을 끝까지 맡는다</span><span class="c">워커 · handle_connection</span></div>
+      <div><span class="k">주방 규칙</span><span class="v">느린 손님은 시간 제한으로 정리</span><span class="c">deadline · 408/504</span></div>
+    </div>
+    <p class="muted">대기줄이 가득 차면 창구에서 바로 "지금은 자리가 없습니다(503)"라고 안내하고, 요리사가 다 바쁜데 줄에 손님이 있으면 오래 머무는 단골(keep-alive 연결)에게 양해를 구하고 다음 손님을 받습니다.</p>
+  </section>
+
+  <!-- 기술 스택 -->
+  <section id="stack">
+    <header>
+      <div class="eyebrow">사용한 기술</div>
+      <h2>라이브러리 대신 운영체제 API를 직접 사용</h2>
+      <p>HTTP 파서, 스레드 풀, 프록시 중계, 타이머는 모두 직접 작성했습니다. 운영체제에는 소켓 통신, 스레드, 프로세스 실행, 파일 열기 같은 기본 기능만 맡겼습니다. 아래는 역할별로 쓴 시스템 호출과 표준 함수입니다.</p>
+    </header>
+    <div class="grid3">
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--accent)"></span>네트워크</h3>
+        <p>연결을 받고, 백엔드에 연결하고, 소켓이 준비될 때까지 기다립니다.</p>
+        <div class="chips"><span class="chip">socket</span><span class="chip">bind</span><span class="chip">listen</span><span class="chip">accept</span><span class="chip">connect</span><span class="chip">poll</span><span class="chip">getaddrinfo</span><span class="chip">shutdown</span><span class="chip">TCP_NODELAY</span><span class="chip">SO_REUSEADDR</span><span class="chip">SO_RCVTIMEO</span></div>
+      </div>
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--green)"></span>동시성</h3>
+        <p>워커 스레드가 대기열을 공유하고, 신호 처리기와 워커가 종료 플래그를 안전하게 주고받습니다.</p>
+        <div class="chips"><span class="chip">pthread_create</span><span class="chip">pthread_mutex</span><span class="chip">pthread_cond</span><span class="chip">pthread_once</span><span class="chip">stdatomic</span><span class="chip">_Thread_local</span><span class="chip">sigaction</span></div>
+      </div>
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--violet)"></span>프로세스 (CGI)</h3>
+        <p>CGI 프로그램을 별도 프로세스로 실행하고 입출력을 연결한 뒤 회수합니다.</p>
+        <div class="chips"><span class="chip">fork</span><span class="chip">fexecve</span><span class="chip">execve</span><span class="chip">setpgid</span><span class="chip">socketpair</span><span class="chip">pipe</span><span class="chip">dup2</span><span class="chip">waitpid</span><span class="chip">kill</span><span class="chip">tmpfile</span></div>
+      </div>
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--amber)"></span>파일 시스템</h3>
+        <p>요청 경로가 공개 폴더 밖으로 나가지 못하게 열기 단계에서 막습니다.</p>
+        <div class="chips"><span class="chip">openat2</span><span class="chip">RESOLVE_BENEATH</span><span class="chip">openat</span><span class="chip">O_NOFOLLOW</span><span class="chip">realpath</span><span class="chip">fstat</span><span class="chip">getrlimit</span></div>
+      </div>
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--muted)"></span>시간</h3>
+        <p>시스템 시계가 바뀌어도 흔들리지 않는 단조 시계로 마감 시각을 계산합니다.</p>
+        <div class="chips"><span class="chip">clock_gettime</span><span class="chip">CLOCK_MONOTONIC</span><span class="chip">pthread_cond_timedwait</span></div>
+      </div>
+      <div class="panel stack-card">
+        <h3><span class="dot" style="background:var(--red)"></span>빌드·검증 도구</h3>
+        <p>코드 밖에서 쓴 도구입니다. 서버 실행에는 필요하지 않습니다.</p>
+        <div class="chips"><span class="chip">make</span><span class="chip">gcc -std=gnu11</span><span class="chip">ASan</span><span class="chip">UBSan</span><span class="chip">bash + curl</span><span class="chip">python3</span><span class="chip">ab / wrk</span><span class="chip">GitHub Actions</span></div>
+      </div>
+    </div>
+    <p class="muted">참고 자료로 CS:APP 교재의 RIO(Robust I/O)와 <code>open_listenfd</code> 패턴을 출발점으로 삼았고, 그 위에 마감 시간, 프록시, 보안 검사를 덧붙였습니다.</p>
+  </section>
+
+  <!-- 아키텍처 -->
+  <section id="arch">
+    <header>
+      <div class="eyebrow">아키텍처</div>
+      <h2>위에서 아래로 흐르는 일곱 층</h2>
+      <p>연결 하나는 위층에서 아래층으로 내려가며 처리됩니다. 위층은 아래층 함수를 부르기만 하고, 아래층은 위층을 모릅니다. 맨 아래 공용 부품은 여러 처리기가 함께 씁니다.</p>
+    </header>
+    <div class="panel scroll">
+      <div class="layers">
+        <div class="layer"><div class="name">진입<small>프로그램 시작</small></div><div class="mods"><div class="mod"><b>main.c</b><span>옵션 파싱, 신호 설정</span></div></div></div>
+        <div class="layer"><div class="name">수락<small>메인 스레드</small></div><div class="mods"><div class="mod k-net"><b>server.c · run_server</b><span>poll + accept 루프, 큐 초과 시 503</span></div><div class="mod k-net"><b>net.c</b><span>듣기 소켓 열기</span></div></div></div>
+        <div class="layer"><div class="name">동시성<small>생산자 → 소비자</small></div><div class="mods"><div class="mod k-conc"><b>threadpool.c</b><span>연결 fd 링 버퍼 + 워커 N개</span></div></div></div>
+        <div class="layer"><div class="name">연결 처리<small>워커 스레드</small></div><div class="mods"><div class="mod k-conc"><b>server.c · handle_connection</b><span>keep-alive 반복, 워커 양보</span></div><div class="mod k-conc"><b>server.c · dispatch</b><span>어느 처리기로 보낼지 결정</span></div></div></div>
+        <div class="layer"><div class="name">HTTP 입력<small>요청 읽기</small></div><div class="mods"><div class="mod k-http"><b>http_request.c</b><span>요청 줄·헤더·본문 파서</span></div><div class="mod k-http"><b>http_framing.c</b><span>chunked 크기 줄 파서</span></div><div class="mod k-http"><b>rio.c</b><span>버퍼 읽기·끝까지 쓰기</span></div><div class="mod k-http"><b>deadline.c</b><span>마감 시각, 마감 있는 I/O</span></div></div></div>
+        <div class="layer"><div class="name">처리기<small>응답 만들기</small></div><div class="mods"><div class="mod"><b>static_file.c</b><span>정적 파일</span></div><div class="mod k-proc"><b>cgi.c</b><span>CGI 실행</span></div><div class="mod k-net"><b>proxy.c</b><span>Reverse Proxy</span></div><div class="mod k-net"><b>forward_proxy.c</b><span>Forward Proxy</span></div></div></div>
+        <div class="layer"><div class="name">공용 부품<small>여러 처리기가 사용</small></div><div class="mods"><div class="mod k-http"><b>response_stream.c</b><span>CGI·백엔드 응답 검증·중계</span></div><div class="mod k-http"><b>http_response.c</b><span>상태 줄·오류 응답</span></div><div class="mod"><b>local_path.c</b><span>경로 해석·루트 밖 차단</span></div><div class="mod"><b>mime.c</b><span>확장자 → Content-Type</span></div><div class="mod k-net"><b>router.c</b><span>접두사 매칭·라운드로빈</span></div><div class="mod k-net"><b>proxy_identity.c</b><span>Via·순환 검사</span></div><div class="mod k-net"><b>net.c</b><span>마감 있는 DNS·연결</span></div><div class="mod"><b>access_log.c</b><span>요청별 로그 한 줄</span></div></div></div>
+      </div>
+    </div>
+    <div class="legend"><span><i class="dot" style="background:var(--accent)"></i>네트워크·프록시</span><span><i class="dot" style="background:var(--green)"></i>동시성</span><span><i class="dot" style="background:var(--amber)"></i>HTTP 형식</span><span><i class="dot" style="background:var(--violet)"></i>프로세스</span><span><i class="dot" style="background:var(--line)"></i>파일·기타</span></div>
+    <div class="note"><b>동시성 모델 선택.</b> 연결마다 프로세스를 만드는 방식은 생성 비용이 크고, 이벤트 루프는 CGI와 파일 I/O를 따로 떼어 내야 해서 복잡합니다. 이 서버는 고정 크기 스레드 풀을 골랐습니다. 동시에 일하는 수가 워커 수로 제한되므로 메모리와 프로세스 수가 예측 가능하고, 코드도 "연결 하나를 처음부터 끝까지 순서대로 처리"하는 형태로 읽기 쉽게 유지됩니다. 대신 기다리는 연결이 워커를 붙잡는 문제가 생기는데, 이것을 시간 제한과 워커 양보로 보완했습니다.</div>
+  </section>
+
+  <!-- 요청의 여정 -->
+  <section id="journey">
+    <header>
+      <div class="eyebrow">요청의 여정</div>
+      <h2>요청 하나가 응답이 되기까지</h2>
+      <p><code>curl http://127.0.0.1:8080/index.html</code>을 보냈을 때 서버 안에서 일어나는 일을 순서대로 적었습니다.</p>
+    </header>
+    <div class="panel">
+      <ol class="journey">
+        <li><div class="body"><b>서버 시작</b><span class="fn">main → run_server</span><p>옵션을 읽고, 끊긴 연결에 쓰다가 죽지 않도록 <code>SIGPIPE</code>를 무시합니다. <code>SIGINT</code>·<code>SIGTERM</code>은 종료 플래그만 세웁니다. 듣기 소켓을 논블로킹으로 열고 워커 8개를 만듭니다.</p></div></li>
+        <li><div class="body"><b>연결 수락</b><span class="fn">poll → accept → setsockopt(TCP_NODELAY)</span><p>메인 스레드는 <code>poll()</code>로 새 연결을 기다리다 <code>accept()</code>로 꺼냅니다. 작은 응답이 지연되지 않게 Nagle 알고리즘을 끄고, 연결을 블로킹 모드로 되돌립니다.</p></div></li>
+        <li><div class="body"><b>대기열에 넣기</b><span class="fn">threadpool_submit</span><p>연결 번호(fd)를 링 버퍼에 넣고 조건 변수로 잠든 워커 하나를 깨웁니다. 버퍼가 가득 차면 이 자리에서 503을 보냅니다.</p></div></li>
+        <li><div class="body"><b>워커가 연결을 맡음</b><span class="fn">worker → handle_connection</span><p>워커는 연결을 닫을 때까지 이 연결만 처리합니다. keep-alive면 같은 연결에서 다음 요청을 반복해서 읽습니다.</p></div></li>
+        <li><div class="body"><b>요청 읽기와 해석</b><span class="fn">read_request → parse_request_line / parse_header_line</span><p>8KB 버퍼(RIO)로 소켓을 읽어 요청 줄, 헤더, 본문을 구조체 <code>http_request</code>에 채웁니다. 크기·시간 상한을 넘으면 오류 상태 코드를 돌려줍니다.</p></div></li>
+        <li><div class="body"><b>처리기 고르기</b><span class="fn">dispatch</span><p>절대 URI인지, 라우팅 규칙과 맞는지, <code>/cgi-bin/</code>인지를 차례로 보고 처리기를 고릅니다. 아래 시뮬레이터에서 직접 시험해 볼 수 있습니다.</p></div></li>
+        <li><div class="body"><b>응답 보내기</b><span class="fn">serve_static_at → send_headers → send_until</span><p>파일을 안전하게 열고, 상태 줄과 헤더를 보낸 뒤 8KB씩 읽어 소켓에 씁니다.</p></div></li>
+        <li><div class="body"><b>마무리</b><span class="fn">finish_request → access_finish → close</span><p>처리기가 돌려준 값이 오류 코드면 오류 응답을 대신 보냅니다. <code>-v</code> 옵션이면 접근 로그 한 줄을 남기고, 연결을 유지하지 않으면 닫습니다.</p></div></li>
+      </ol>
+    </div>
+
+    <div class="sub">
+      <h3>직접 해 보기: 이 요청은 어디로 갈까?</h3>
+      <p class="muted">서버가 <code>-p 8080 -c conf/routes.conf</code>로 떠 있고 라우팅 규칙이 <code>/api/ → 127.0.0.1:8001, 8002</code>라고 가정합니다. <code>dispatch()</code>의 판단 순서를 그대로 옮겼습니다.</p>
+      <div class="panel sim">
+        <div class="controls">
+          <select id="method" aria-label="메서드"><option>GET</option><option>POST</option><option>HEAD</option></select>
+          <input type="text" id="uri" value="/api/users?page=2" aria-label="요청 대상 URI" spellcheck="false">
+        </div>
+        <div class="controls">
+          <label><input type="checkbox" id="fwd"> <code>-f</code> Forward Proxy 허용</label>
+          <label><input type="checkbox" id="routes" checked> <code>-c</code> 라우팅 규칙 사용</label>
+        </div>
+        <div class="examples">예시:
+          <button class="small" data-u="/index.html">/index.html</button>
+          <button class="small" data-u="/api/users?page=2">/api/users?page=2</button>
+          <button class="small" data-u="/cgi-bin/adder?a=1&amp;b=2">/cgi-bin/adder?a=1&amp;b=2</button>
+          <button class="small" data-u="http://example.com/a.html">http://example.com/a.html</button>
+          <button class="small" data-u="http://localhost:8080/api/x">http://localhost:8080/api/x</button>
+        </div>
+        <div class="checks" id="checks"></div>
+        <div class="result" id="result"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 스레드 풀 -->
+  <section id="pool">
+    <header>
+      <div class="eyebrow">동시성</div>
+      <h2>스레드 풀과 워커 양보</h2>
+      <p>메인 스레드(생산자)가 연결을 원형 대기열에 넣고, 워커(소비자)가 하나씩 꺼냅니다. 대기열은 <code>head</code>·<code>tail</code> 두 위치만 움직이는 고정 크기 배열이라 메모리를 새로 할당하지 않습니다. 대기열은 뮤텍스 하나로 보호하고, 비어 있으면 워커는 조건 변수에서 잠듭니다.</p>
+    </header>
+
+    <div class="panel sim">
+      <div class="controls">
+        <button class="primary" id="poolArrive">새 연결 도착</button>
+        <button id="poolStep">시간 한 칸 진행</button>
+        <button id="poolAuto" aria-pressed="false">자동 재생</button>
+        <label>도착 빈도 <input type="range" id="poolRate" min="0" max="100" value="45" aria-label="자동 재생 시 연결 도착 빈도"></label>
+        <button id="poolReset">처음 상태로</button>
+      </div>
+      <div class="pool">
+        <div>
+          <div class="lane-title">대기열 (축소 모형: 칸 6개 · 실제 기본값 1024)</div>
+          <div class="ring" id="ring"></div>
+          <div style="height:12px"></div>
+          <div class="meter" id="meter"></div>
+          <div style="height:8px"></div>
+          <span class="flag" id="waitFlag"></span>
+        </div>
+        <div>
+          <div class="lane-title">워커 (축소 모형: 4개 · 실제 기본값 8)</div>
+          <div class="workers" id="workers"></div>
+        </div>
+      </div>
+      <div class="logbox" id="poolLog" aria-live="polite"></div>
+      <p class="muted" style="font-size:13px">초록은 요청 처리 중, 파랑은 응답을 보낸 뒤 같은 연결의 다음 요청을 기다리는(keep-alive) 상태입니다. 대기열에 연결이 있으면 파란 워커는 잠깐(실제 100ms) 기다린 뒤 연결을 닫고 다음 연결을 맡습니다.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>양보를 결정하는 한 줄</h3>
+        <p style="font-size:14.5px"><code>threadpool_has_waiting()</code>은 <code>count &gt; idle</code>을 돌려줍니다. 대기열에 든 연결 수가 잠든 워커 수보다 많으면 "누군가 진짜로 기다리고 있다"는 뜻입니다. 막 깨어나는 중인 워커가 가져갈 연결은 대기로 세지 않습니다.</p>
+        <p style="font-size:14.5px" class="muted">양보는 두 곳에서 일어납니다. 응답을 보내기 직전에 기다리는 연결이 있으면 그 응답을 <code>Connection: close</code>로 보내고, 다음 요청을 기다리는 유휴 연결은 100ms 이상 조용하면 닫습니다.</p>
+      </div>
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>왜 양보가 필요한가</h3>
+        <p style="font-size:14.5px">워커가 8개인데 keep-alive 연결이 9개면, 아홉 번째는 누군가 5초 타임아웃으로 끊길 때까지 기다려야 합니다. 양보가 있으면 그 대기가 사라지는 대신 연결 재사용의 이득이 줄어듭니다. 아래 <a href="#verify">부하 측정</a>에서 동시 연결 8개 → 9개 구간의 처리량 변화가 이 효과입니다.</p>
+      </div>
+    </div>
+
+    <div class="sub">
+      <h3>연결을 닫는 순서: 그냥 <code>close()</code>하면 응답을 잃는다</h3>
+      <p class="muted">읽지 않은 데이터가 남은 소켓을 닫으면 커널은 FIN 대신 RST를 보냅니다. 클라이언트는 RST를 받는 순간 아직 읽지 않은 응답까지 버릴 수 있습니다. 그래서 서버는 송신만 먼저 닫고 남은 입력을 잠깐 버린 뒤 닫습니다(<code>linger_close_input</code>).</p>
+      <div class="panel wire">
+        <div class="wire-row"><span class="lbl">바로 close()</span><div class="pkts"><span class="pkt ok">응답 200 전송</span><span class="arr">→</span><span class="pkt">클라이언트가 다음 요청 전송</span><span class="arr">→</span><span class="pkt bad">close() → RST</span><span class="arr">→</span><span class="pkt bad">클라이언트가 응답을 잃음</span></div></div>
+        <div class="wire-row"><span class="lbl">이 서버의 방식</span><div class="pkts"><span class="pkt ok">응답 200 전송</span><span class="arr">→</span><span class="pkt info">shutdown(SHUT_WR) → FIN</span><span class="arr">→</span><span class="pkt info">입력 50ms 버리기</span><span class="arr">→</span><span class="pkt ok">close()</span><span class="arr">→</span><span class="pkt ok">응답 온전히 도착</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 시간 예산 -->
+  <section id="time">
+    <header>
+      <div class="eyebrow">시간 예산</div>
+      <h2>느린 상대가 워커를 붙잡지 못하게</h2>
+      <p>워커 수가 정해져 있으므로, 한 연결이 워커를 오래 붙잡으면 다른 손님이 기다립니다. 그래서 모든 읽기·쓰기·연결에 마감 시각을 붙였습니다. 마감은 "지금부터 몇 초"가 아니라 <code>CLOCK_MONOTONIC</code> 기준의 절대 시각(밀리초)으로 저장합니다. 데이터가 1바이트씩 조금씩 와도 마감이 뒤로 밀리지 않습니다.</p>
+    </header>
+    <div class="panel scroll"><svg id="gantt" role="img" aria-label="단계별 시간 상한을 0초부터 30초까지 같은 축척으로 그린 막대 그림"></svg></div>
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>종료 마감과 합치기</h3>
+        <p style="font-size:14.5px">모든 대기 함수는 실제 마감으로 <code>effective_deadline(end)</code>를 씁니다. 평소에는 각자의 마감이 그대로 쓰이고, 종료 신호를 받으면 "지금 + 5초"인 종료 마감과 비교해 더 이른 쪽을 씁니다. 그래서 30초짜리 중계도 종료 중에는 5초 안에 정리됩니다.</p>
+        <p class="mono" style="font-size:13px;color:var(--accent)">실제 마감 = min(각자의 마감, 종료 마감)</p>
+      </div>
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>예산 나눠 쓰기</h3>
+        <p style="font-size:14.5px">프록시는 DNS 조회부터 응답 헤더까지 5초를 한 번에 받습니다. 백엔드 후보가 2개면 첫 후보에 남은 시간의 절반(2.5초)만 주고, 실패하면 남은 시간을 아직 시도하지 않은 후보 수로 다시 나눕니다. 한 이름이 여러 IP로 풀릴 때도 같은 방식입니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HTTP 파싱 -->
+  <section id="http">
+    <header>
+      <div class="eyebrow">HTTP 파싱</div>
+      <h2>요청을 한 줄씩 읽어 구조체로</h2>
+      <p>HTTP 요청은 텍스트입니다. 서버는 줄 단위로 읽어 요청 줄과 헤더를 나누고, 빈 줄이 나오면 본문을 읽을 차례로 넘어갑니다. 각 부분에는 상한이 있어 넘으면 알맞은 오류 코드로 답합니다.</p>
+    </header>
+    <div class="scroll">
+      <div class="anatomy">
+        <div class="row"><div class="src hl-line">POST /cgi-bin/adder?x=1 HTTP/1.1\r\n</div><div class="ann"><span><span class="badge info">요청 줄</span>메서드·URI·버전</span><span><span class="badge">414</span>URI 2047바이트 초과 <span class="badge">501</span>GET·POST·HEAD 외 <span class="badge">505</span>버전</span></div></div>
+        <div class="row"><div class="src hl-head">Host: 127.0.0.1:8080\r\nContent-Type: application/x-www-form-urlencoded\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n</div><div class="ann"><span><span class="badge info">헤더</span>고정 배열 32칸</span><span><span class="badge">431</span>32개 초과·한 줄 8KB·값 1KB 초과</span><span><span class="badge">417</span>100-continue 외의 Expect</span><span><span class="badge">400</span>Content-Length와 TE 동시 사용</span></div></div>
+        <div class="row"><div class="src">\r\n</div><div class="ann"><span><span class="badge ok">빈 줄</span>헤더 끝. 여기까지 5초 <span class="badge">408</span></span></div></div>
+        <div class="row"><div class="src hl-body">7\r\na=1&amp;b=2\r\n0\r\n\r\n</div><div class="ann"><span><span class="badge info">본문</span>chunked 조각을 이어 붙임</span><span><span class="badge">413</span>디코딩 후 1MB 초과 <span class="badge">408</span>본문 5초 초과</span></div></div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>RIO: 적게 읽혀도 괜찮게</h3>
+        <p style="font-size:14.5px">TCP에서 <code>read()</code>는 요청한 양보다 적게 돌려줄 수 있습니다(short count). RIO는 한 번에 최대 8KB를 내부 버퍼로 받아 두고, 줄 단위·바이트 수 단위로 조금씩 꺼내 줍니다. 쓰기 쪽 <code>rio_writen</code>·<code>send_until</code>은 전부 보낼 때까지 반복합니다.</p>
+        <div class="pkts"><span class="pkt">커널 소켓 버퍼</span><span class="arr">→ read() 최대 8KB →</span><span class="pkt info">rio_t.buf</span><span class="arr">→</span><span class="pkt ok">한 줄씩 꺼내기</span></div>
+      </div>
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>파이프라이닝 대응</h3>
+        <p style="font-size:14.5px">클라이언트가 응답을 기다리지 않고 요청 두 개를 연달아 보내면 두 번째 요청이 이미 RIO 버퍼에 들어 있습니다. <code>wait_request_start</code>는 버퍼에 남은 바이트(<code>rio-&gt;cnt</code>)가 있으면 소켓을 기다리지 않고 바로 다음 요청을 읽습니다.</p>
+      </div>
+    </div>
+    <div class="sub">
+      <h3>처리기의 반환값 약속</h3>
+      <p class="muted">모든 처리기는 같은 규칙으로 결과를 돌려줍니다. 오류 응답을 보내는 일은 워커 한 곳(<code>finish_request</code>)에서만 하므로 처리기마다 오류 응답 코드를 반복하지 않아도 됩니다.</p>
+      <div class="ret">
+        <div class="ok"><span class="v">0</span><b>성공</b><p>처리기가 응답을 이미 다 보냈습니다. keep-alive면 다음 요청으로 넘어갑니다.</p></div>
+        <div class="st"><span class="v">&gt; 0</span><b>HTTP 상태 코드</b><p>404, 502 같은 값입니다. 워커가 해당 오류 응답을 대신 보냅니다.</p></div>
+        <div class="cl"><span class="v">-1</span><b>연결 종료</b><p>응답 도중 끊겼거나 헤더를 이미 보낸 뒤라 오류 응답을 보낼 수 없습니다. 바로 닫습니다.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 정적 파일 -->
+  <section id="static">
+    <header>
+      <div class="eyebrow">정적 파일</div>
+      <h2>공개 폴더 밖으로 못 나가게 다섯 번 거르기</h2>
+      <p>정적 파일 처리의 핵심은 파일을 보내는 것보다 <em>보내면 안 되는 파일</em>을 막는 일입니다. URL 경로는 다섯 단계를 거쳐야 파일이 됩니다. 왼쪽은 하는 일, 오른쪽은 막는 공격입니다.</p>
+    </header>
+    <div class="funnel">
+      <div class="fstep"><div class="what"><b>1. 퍼센트 인코딩 한 번 해석</b><code>decode_url_path</code></div><div class="blocks"><span class="badge">400</span>제어 문자, 역슬래시(<code>\</code>), 잘못된 <code>%xx</code></div></div>
+      <div class="fstep" style="margin-inline:12px"><div class="what"><b>2. <code>..</code> 경로 조각 거부</b><code>canonical_target</code></div><div class="blocks"><span class="badge">403</span><code>/../etc/passwd</code>, <code>/%2e%2e/</code> 같은 상위 폴더 탈출</div></div>
+      <div class="fstep" style="margin-inline:24px"><div class="what"><b>3. 실제 경로가 루트 안인지 확인</b><code>realpath</code></div><div class="blocks"><span class="badge">403</span>루트 밖을 가리키는 심볼릭 링크</div></div>
+      <div class="fstep" style="margin-inline:36px"><div class="what"><b>4. 미리 연 루트 폴더 fd 기준으로 다시 열기</b><code>openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)</code></div><div class="blocks"><span class="badge">403</span>3단계 확인 뒤 경로를 몰래 링크로 바꿔치기(TOCTOU). <code>openat2</code>가 없으면 한 단계씩 <code>openat(O_NOFOLLOW)</code></div></div>
+      <div class="fstep" style="margin-inline:48px"><div class="what"><b>5. 연 파일의 종류 확인</b><code>fstat</code></div><div class="blocks"><span class="badge info">301</span>폴더면 끝에 <code>/</code>를 붙인 주소로 안내 <span class="badge">403</span>일반 파일이 아님</div></div>
+    </div>
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>보내기</h3>
+        <p style="font-size:14.5px">확장자로 Content-Type을 정하고(<code>.html</code> → <code>text/html</code>, 모르면 <code>application/octet-stream</code>), 파일 크기를 Content-Length로 보낸 뒤 8KB씩 읽어 씁니다. HEAD는 헤더만, POST는 405입니다. 응답 헤더에는 <code>Date</code>가 함께 들어갑니다.</p>
+      </div>
+      <div class="panel" style="display:grid;gap:8px">
+        <h3>왜 경로 문자열이 아니라 fd로 다시 여나</h3>
+        <p style="font-size:14.5px">경로를 검사한 순간과 여는 순간 사이에 누군가 폴더를 링크로 바꾸면 검사가 무의미해집니다. 서버는 시작할 때 루트 폴더를 미리 열어 두고(<code>init_local_root</code>), 그 fd 아래에서만 파일을 엽니다. 검사와 열기가 같은 기준을 보게 됩니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- CGI -->
+  <section id="cgi">
+    <header>
+      <div class="eyebrow">CGI</div>
+      <h2>다른 프로그램을 실행해 그 출력을 응답으로</h2>
+      <p><code>/cgi-bin/</code>으로 시작하는 요청은 해당 실행 파일을 새 프로세스로 띄웁니다. 요청 정보는 환경 변수로, 본문은 표준 입력으로 주고, 프로그램이 표준 출력에 쓴 내용을 클라이언트에게 중계합니다. 예제 <code>adder</code>는 <code>a=1&amp;b=2</code>를 받아 <code>3</code>을 출력합니다.</p>
+    </header>
+    <div class="panel scroll">
+      <div class="swim">
+        <div class="head p">워커 스레드 (부모)</div><div></div><div class="head c">CGI 프로세스 (자식)</div>
+        <div class="cell"><b>본문을 임시 파일에 저장</b><code>tmpfile()</code><span class="muted">본문을 다 쓰기 전에 자식이 출력을 쏟아내도 서로 막히지 않게</span></div><div class="mid">·</div><div class="cell empty"></div>
+        <div class="cell"><b>출력 통로와 보고용 파이프 준비</b><code>socketpair()</code> · <code>pipe()</code> + <code>FD_CLOEXEC</code></div><div class="mid">·</div><div class="cell empty"></div>
+        <div class="cell"><b>프로세스 복제</b><code>fork()</code></div><div class="mid">→</div><div class="cell"><b>새 프로세스 그룹 만들기</b><code>setpgid(0, 0)</code></div>
+        <div class="cell empty"></div><div class="mid">·</div><div class="cell"><b>입출력 연결, 나머지 fd 닫기</b><code>dup2(임시파일 → stdin)</code> · <code>dup2(socketpair → stdout)</code> · <code>close_range</code></div>
+        <div class="cell empty"></div><div class="mid">·</div><div class="cell"><b>검증한 파일 그대로 실행</b><code>fexecve(fd, argv, env)</code><span class="muted">macOS는 하드 링크 + inode 비교 후 <code>execve</code></span></div>
+        <div class="cell"><b>실행 성공 여부 확인</b><span class="muted">보고 파이프가 아무것도 없이 닫히면 성공(CLOEXEC). 오류 번호가 오면 403/500</span></div><div class="mid">←</div><div class="cell"><b>실패 시 errno를 파이프로</b><code>write(report, errno)</code> · <code>_exit(127)</code></div>
+        <div class="cell"><b>출력 검사 후 중계</b><code>response_until</code><span class="muted"><code>Status:</code> 헤더를 상태 줄로, <code>Location:</code>만 있으면 302로 바꿈</span></div><div class="mid">←</div><div class="cell"><b>stdout에 헤더 + 본문 출력</b></div>
+        <div class="cell"><b>회수</b><code>waitpid</code><span class="muted">실패·마감·종료 시 <code>kill(-pgid, SIGKILL)</code>로 손자까지 정리</span></div><div class="mid">·</div><div class="cell empty"></div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="panel scroll">
+        <h3 style="margin-bottom:8px">자식에게 주는 환경 변수</h3>
+        <table>
+          <thead><tr><th>변수</th><th>값의 출처</th></tr></thead>
+          <tbody>
+            <tr><td><code>REQUEST_METHOD</code></td><td>요청 메서드</td></tr>
+            <tr><td><code>QUERY_STRING</code></td><td><code>?</code> 뒤 문자열</td></tr>
+            <tr><td><code>CONTENT_LENGTH</code> · <code>CONTENT_TYPE</code></td><td>본문 길이와 형식</td></tr>
+            <tr><td><code>SCRIPT_NAME</code></td><td>디코딩한 공개 경로</td></tr>
+            <tr><td><code>SERVER_NAME</code> · <code>SERVER_PORT</code></td><td>Host 헤더, 실제 수신 포트</td></tr>
+            <tr><td><code>REMOTE_ADDR</code></td><td>TCP 상대 IP</td></tr>
+            <tr><td><code>GATEWAY_INTERFACE</code> · <code>PATH</code></td><td><code>CGI/1.1</code>, <code>/usr/bin:/bin</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel" style="display:grid;gap:8px;align-content:start">
+        <h3>CGI 응답 뒤에는 언제 연결을 재사용할까?</h3>
+        <p style="font-size:14.5px">예제 adder는 <code>Content-Length</code>로 본문의 길이를 알려 줍니다. 요청과 워커가 연결 유지를 허용하면 그 길이만큼 보낸 뒤 같은 연결에서 다음 요청을 받습니다. CGI가 길이를 생략하거나 <code>Connection: close</code>를 출력하면 응답 후 연결을 닫습니다.</p>
+        <h3 style="margin-top:6px">왜 프로세스 그룹인가</h3>
+        <p style="font-size:14.5px">CGI가 또 다른 프로그램을 띄웠다면, 자식만 죽여서는 손자가 남습니다. 요청마다 새 그룹을 만들고 그룹 전체에 신호를 보내 한 번에 정리합니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 프록시 -->
+  <section id="proxy">
+    <header>
+      <div class="eyebrow">프록시</div>
+      <h2>두 개의 연결을 이어 주는 중계자</h2>
+      <p>프록시는 클라이언트와의 연결, 백엔드와의 연결 두 개를 잡고 요청을 앞으로, 응답을 뒤로 옮깁니다. 두 방식의 차이는 "누가 목적지를 정하느냐"입니다.</p>
+    </header>
+    <div class="panel scroll">
+      <svg viewBox="0 0 760 250" style="width:100%;min-width:620px;height:auto" role="img" aria-label="Reverse Proxy와 Forward Proxy의 연결 구조 비교">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>
+        <text x="10" y="22" font-size="13" font-weight="700" fill="var(--ink)">Reverse Proxy: 서버가 경로를 보고 목적지를 정함</text>
+        <rect x="10" y="42" width="120" height="46" rx="8" fill="var(--surface-2)" stroke="var(--line)"/><text x="70" y="70" text-anchor="middle" font-size="13" fill="var(--ink)">클라이언트</text>
+        <rect x="230" y="36" width="170" height="58" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="315" y="60" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent)">이 서버 :8080</text><text x="315" y="80" text-anchor="middle" font-size="11.5" class="t-mono" fill="var(--accent)">/api/ 최장 접두사</text>
+        <rect x="520" y="30" width="200" height="30" rx="7" fill="var(--green-soft)" stroke="var(--green)"/><text x="620" y="50" text-anchor="middle" font-size="12" class="t-mono" fill="var(--green)">127.0.0.1:8001</text>
+        <rect x="520" y="72" width="200" height="30" rx="7" fill="var(--green-soft)" stroke="var(--green)"/><text x="620" y="92" text-anchor="middle" font-size="12" class="t-mono" fill="var(--green)">127.0.0.1:8002</text>
+        <line x1="132" y1="65" x2="226" y2="65" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/><text x="180" y="58" text-anchor="middle" font-size="11" class="t-mono" fill="var(--muted)">GET /api/</text>
+        <line x1="402" y1="58" x2="516" y2="45" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+        <line x1="402" y1="72" x2="516" y2="87" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah)"/><text x="458" y="112" text-anchor="middle" font-size="11" fill="var(--muted)">번갈아(라운드로빈)</text>
+        <text x="10" y="152" font-size="13" font-weight="700" fill="var(--ink)">Forward Proxy: 클라이언트가 절대 URI로 목적지를 정함 (-f 필요)</text>
+        <rect x="10" y="172" width="120" height="46" rx="8" fill="var(--surface-2)" stroke="var(--line)"/><text x="70" y="200" text-anchor="middle" font-size="13" fill="var(--ink)">클라이언트</text>
+        <rect x="230" y="166" width="170" height="58" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="315" y="190" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent)">이 서버 :8080</text><text x="315" y="210" text-anchor="middle" font-size="11.5" class="t-mono" fill="var(--accent)">DNS 조회 → 연결</text>
+        <rect x="520" y="176" width="200" height="38" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"/><text x="620" y="200" text-anchor="middle" font-size="12" class="t-mono" fill="var(--violet)">example.com:80</text>
+        <line x1="132" y1="195" x2="226" y2="195" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/><text x="180" y="188" text-anchor="middle" font-size="10.5" class="t-mono" fill="var(--muted)">GET http://…</text>
+        <line x1="402" y1="195" x2="516" y2="195" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/><text x="458" y="188" text-anchor="middle" font-size="11" class="t-mono" fill="var(--muted)">GET /a.html</text>
+      </svg>
+    </div>
+
+    <div class="sub">
+      <h3>직접 해 보기: 라운드로빈과 장애 전환</h3>
+      <p class="muted">백엔드 상태를 바꾸고 요청을 보내 보세요. <code>select_backend</code>·<code>finish_backend</code>·<code>reverse_proxy_until</code>의 규칙을 옮긴 모형이며, 아래 로그는 <code>-v</code> 옵션의 접근 로그 형식입니다.</p>
+      <div class="panel sim">
+        <div class="backs" id="backs"></div>
+        <div class="controls">
+          <button class="primary" id="pxSend">GET /api/ 보내기</button>
+          <button id="pxWait">5초 지나가게 하기</button>
+          <span class="flag" id="pxClock"></span>
+        </div>
+        <div class="logbox" id="pxLog" aria-live="polite"></div>
+      </div>
+      <div class="grid3">
+        <div class="panel" style="display:grid;gap:6px;align-content:start"><h3>연결 거부</h3><p style="font-size:14px">백엔드가 꺼져 있으면 즉시 다음 후보로 넘어갑니다. 거부는 제외 기간을 만들지 않으므로 서버가 다시 켜지면 다음 요청부터 바로 쓰입니다. 모두 거부하면 <b>502</b>.</p></div>
+        <div class="panel" style="display:grid;gap:6px;align-content:start"><h3>응답 없음</h3><p style="font-size:14px">자기 몫의 시간(2.5초)을 다 쓰고 다음 후보로 넘어가며, 이 백엔드를 <b>5초간 제외</b>합니다. 제외가 끝나면 요청 하나가 먼저 복구를 확인합니다. 전체 5초를 넘기면 <b>504</b>.</p></div>
+        <div class="panel" style="display:grid;gap:6px;align-content:start"><h3>재시도하지 않는 경우</h3><p style="font-size:14px">연결에 성공해 요청을 보내기 시작했다면 실패해도 다른 백엔드로 다시 보내지 않습니다. POST가 두 번 실행되는 일을 막기 위해서입니다.</p></div>
+      </div>
+    </div>
+
+    <div class="sub">
+      <h3>백엔드로 보낼 때 헤더가 바뀌는 방식</h3>
+      <p class="muted">연결 하나 구간에서만 의미가 있는 헤더(hop-by-hop)는 지우고, 프록시가 알게 된 정보를 더합니다.</p>
+      <div class="scroll">
+        <div class="diff">
+          <div class="hd">클라이언트 → 이 서버 → 백엔드 (127.0.0.1:8001)</div>
+          <div class="keep">GET /api/users?page=2 HTTP/1.1</div>
+          <div class="keep">Host: 127.0.0.1:8080</div>
+          <div class="keep">Accept: application/json</div>
+          <div class="del">- Connection: keep-alive        연결 단위 헤더 삭제</div>
+          <div class="del">- Keep-Alive: timeout=5         Proxy-*, TE, Upgrade, Expect 등도 삭제</div>
+          <div class="del">- X-Forwarded-For: 6.6.6.6       클라이언트가 보낸 값은 믿지 않음</div>
+          <div class="add">+ X-Forwarded-For: 127.0.0.1     실제 TCP 상대 주소</div>
+          <div class="add">+ X-Forwarded-Proto: http</div>
+          <div class="add">+ Via: 1.1 127.0.0.1:8080 (w13-&lt;무작위 128비트&gt;)</div>
+          <div class="add">+ Connection: close</div>
+        </div>
+      </div>
+      <div class="note"><b>무한 루프 막기.</b> 서버는 시작할 때 <code>/dev/urandom</code>으로 자기 식별자를 만들어 <code>Via</code>에 넣습니다. 요청의 <code>Via</code>에서 자기 식별자나 자기 주소를 다시 발견하면, 또는 백엔드 주소가 자기 자신이면 요청을 보내지 않고 <b>508 Loop Detected</b>로 끝냅니다. 설정 실수로 프록시가 자기 자신을 가리켜도 요청이 끝없이 돌지 않습니다.</div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:8px;align-content:start">
+        <h3>마감이 있는 DNS 조회</h3>
+        <p style="font-size:14.5px"><code>getaddrinfo()</code>에는 시간 제한이 없습니다. 그래서 조회를 별도 스레드(분리 스레드)에 맡기고, 워커는 조건 변수에서 마감까지만 기다립니다. 마감이 지나면 결과를 포기하고, 늦게 끝난 조회 스레드가 메모리를 직접 정리합니다. 동시에 도는 조회는 최대 8개로 제한합니다.</p>
+        <div class="pkts"><span class="pkt">워커</span><span class="arr">→ 생성 →</span><span class="pkt info">조회 스레드</span><span class="arr">→ 결과 →</span><span class="pkt ok">조건 변수 깨움</span></div>
+      </div>
+      <div class="panel" style="display:grid;gap:8px;align-content:start">
+        <h3>응답 중계 (response_stream.c)</h3>
+        <p style="font-size:14.5px">백엔드·CGI의 응답을 그대로 흘려보내지 않고 상태 줄과 헤더를 먼저 검사합니다. 103 같은 중간 응답은 최종 응답보다 먼저 전달하고, chunked 응답은 인코딩을 유지한 채 조각 단위로 옮깁니다. 응답에도 <code>Via</code>를 붙이고, 중계 전체에 30초, 멈춤에 5초 상한을 둡니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 과부하·종료 -->
+  <section id="ops">
+    <header>
+      <div class="eyebrow">과부하와 종료</div>
+      <h2>넘칠 때와 끝날 때도 깔끔하게</h2>
+    </header>
+    <div class="grid2">
+      <div class="panel" style="display:grid;gap:10px;align-content:start">
+        <h3>대기열이 가득 찼을 때</h3>
+        <p style="font-size:14.5px">메인 스레드가 직접 503을 보내고 송신을 닫습니다. 그리고 그 연결을 <code>poll</code> 목록에 올려 클라이언트가 닫을 때까지(최대 1초) 입력을 버립니다. 이렇게 붙잡은 연결이 64개가 되면 <code>accept</code>를 잠시 멈추고 새 연결은 커널 대기열(listen backlog)에 둡니다.</p>
+        <div class="pkts"><span class="pkt">accept</span><span class="arr">→</span><span class="pkt bad">submit 실패</span><span class="arr">→</span><span class="pkt bad">503 전송</span><span class="arr">→</span><span class="pkt info">SHUT_WR + 1초 대기</span><span class="arr">→</span><span class="pkt ok">close</span></div>
+      </div>
+      <div class="panel" style="display:grid;gap:10px;align-content:start">
+        <h3>열린 파일 수 미리 확보</h3>
+        <p style="font-size:14.5px">대기열의 연결과 워커가 쓰는 파일이 프로세스 한도를 넘으면 <code>accept</code>가 실패해 503조차 못 보냅니다. 시작할 때 필요한 수를 계산해 soft 한도를 올리고, hard 한도가 부족하면 큐를 줄이고 경고합니다.</p>
+        <div class="budget" role="img" aria-label="기본 설정에서 필요한 열린 파일 수 1184개의 구성">
+          <div style="flex:64;background:var(--green-soft)" title="워커 8 × 8">64</div>
+          <div style="flex:96;background:var(--amber-soft)" title="여유분 96">96</div>
+          <div style="flex:1024;background:var(--accent-soft)">대기열 1024</div>
+        </div>
+        <p class="mono" style="font-size:12.5px;color:var(--muted)">워커 8 × 8 + 여유 96 + 큐 1024 = 1,184개</p>
+      </div>
+    </div>
+    <div class="sub">
+      <h3>SIGTERM을 받은 뒤의 순서</h3>
+      <div class="panel tl">
+        <div class="tl-item"><span class="when">즉시</span><div class="what"><b>신호 처리기가 원자 변수 <code>g_stop</code>만 1로 바꿈</b><span>신호 처리기 안에서는 안전한 일만 해야 하므로 잠금 없는 원자 변수 하나만 씁니다.</span></div></div>
+        <div class="tl-item"><span class="when">≤ 250ms</span><div class="what"><b>수락 루프가 <code>poll</code>에서 깨어나 빠져나옴</b><span>poll에 최대 250ms 제한을 둬 accept에 갇히지 않습니다.</span></div></div>
+        <div class="tl-item"><span class="when">+0</span><div class="what"><b>종료 마감 = 지금 + 5초 공표, 듣기 소켓 닫기</b><span>모든 대기 함수가 이 마감을 함께 봅니다.</span></div></div>
+        <div class="tl-item"><span class="when">≤ 5초</span><div class="what"><b>워커는 이미 도착한 요청만 끝내고 조용한 연결은 바로 닫음</b><span>대기열에 남은 연결 중 요청을 보내지 않은 것도 처리하지 않고 닫습니다.</span></div></div>
+        <div class="tl-item"><span class="when">5초</span><div class="what"><b>남은 중계 중단, CGI 그룹에 SIGKILL, 자식 회수</b><span><code>threadpool_destroy</code>가 모든 워커를 <code>pthread_join</code>으로 기다린 뒤 메모리를 해제합니다.</span></div></div>
+        <div class="tl-item"><span class="when">끝</span><div class="what"><b>종료 코드 0</b><span>테스트에서는 유휴 연결이 있는 상태에서 약 30ms 만에 끝났습니다.</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 빌드·검증 -->
+  <section id="verify">
+    <header>
+      <div class="eyebrow">빌드와 검증</div>
+      <h2>어떻게 확인했나</h2>
+      <p>Makefile 하나로 일반 빌드와 메모리 검사 빌드를 나누고, C 단위 테스트부터 실제 서버를 띄우는 기능 테스트, 종료 테스트, 부하 측정까지 층을 나눠 검증합니다.</p>
+    </header>
+    <div class="build">
+      <div class="panel" style="display:grid;gap:8px;align-content:start">
+        <h3>두 가지 빌드가 섞이지 않게</h3>
+        <div class="tree">make        →  build/normal/*.o  →  bin/server, cgi-bin/adder
+make asan   →  build/asan/*.o    →  bin/asan/server
+               (-fsanitize=address,undefined)</div>
+        <p style="font-size:14px" class="muted"><code>-MMD -MP</code>로 헤더 의존성을 자동 추적해 헤더만 바뀌어도 필요한 파일이 다시 컴파일됩니다. 파서 테스트는 <code>-Drio_readline_until=test_request_readline_until</code>로 읽기 함수를 가로채 호출 순서를 관찰합니다.</p>
+      </div>
+      <div class="panel scroll">
+        <h3 style="margin-bottom:8px">검사 층</h3>
+        <table>
+          <thead><tr><th>명령</th><th>확인하는 것</th></tr></thead>
+          <tbody>
+            <tr><td><code>make test</code></td><td>파서 상한·시간 초과, MIME, 라우팅, 프록시 중계, 경로 경계, CGI, 스레드 풀</td></tr>
+            <tr><td><code>functional.sh</code></td><td>서버 5개를 실제로 띄워 curl로 정적·CGI·keep-alive·프록시·503 확인</td></tr>
+            <tr><td><code>test_shutdown.py</code></td><td>SIGTERM 유예, CGI 자식·손자 정리</td></tr>
+            <tr><td><code>make asan</code></td><td>메모리 오류·누수·정의되지 않은 동작</td></tr>
+            <tr><td><code>load.sh</code></td><td>ab 또는 wrk로 처리량·실패·지연</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel" style="display:grid;gap:6px">
+      <h3>CI (GitHub Actions)</h3>
+      <div class="pkts"><span class="pkt info">push · PR</span><span class="arr">→</span><span class="pkt">Ubuntu: 빌드(-Werror)</span><span class="arr">→</span><span class="pkt">단위</span><span class="arr">→</span><span class="pkt">기능</span><span class="arr">→</span><span class="pkt">종료</span><span class="arr">→</span><span class="pkt ok">ASan·UBSan</span></div>
+      <div class="pkts"><span class="pkt info">push · PR</span><span class="arr">→</span><span class="pkt">macOS: 빌드</span><span class="arr">→</span><span class="pkt ok">단위</span><span class="muted" style="font-size:13px">&nbsp;이식성 확인 (fexecve 대신 하드 링크 경로 등)</span></div>
+    </div>
+
+    <div class="sub">
+      <h3>부하 측정: 동시 연결 수에 따른 초당 처리 요청 수</h3>
+      <p class="muted">커밋 <code>3a6b120</code>, Windows Docker(<code>gcc:14</code>) 컨테이너 한 곳에서 서버와 ApacheBench를 함께 실행, 기본 설정(워커 8, 큐 1024), 319바이트 <code>/index.html</code>, 요청 5,000건, 조건마다 1회. 클라이언트와 CPU를 나눠 쓰므로 절대값보다 경향을 보는 자료입니다. 모든 조건에서 실패 0건.</p>
+      <div class="panel scroll"><svg id="loadChart" role="img" aria-label="동시 연결 1, 8, 9, 32, 64, 100, 256개에서 keep-alive 사용 여부별 초당 요청 수 막대 그래프"></svg></div>
+      <div class="legend"><span><i class="dot" style="background:var(--muted)"></i>연결 재사용 없음</span><span><i class="dot" style="background:var(--accent)"></i>keep-alive (<code>ab -k</code>)</span><span>동시 9개의 재사용 없음 조건은 측정하지 않았습니다</span></div>
+      <p style="font-size:14.5px">keep-alive는 연결 수가 워커 수(8)와 같을 때 가장 빠릅니다(38,253건/초). 9개부터는 남는 연결에 워커를 넘겨주느라 연결을 닫게 되어, 재사용 없음과 비슷한 수준(약 1만~1만 2천 건/초)으로 내려갑니다. 대신 어떤 연결도 5초 타임아웃만큼 멈춰 서지 않습니다.</p>
+    </div>
+
+    <div class="sub">
+      <h3>운영체제별 차이</h3>
+      <div class="panel scroll">
+        <table>
+          <thead><tr><th>기능</th><th>Linux · WSL</th><th>macOS</th></tr></thead>
+          <tbody>
+            <tr><td>파일을 루트 아래에서만 열기</td><td><code>openat2(RESOLVE_BENEATH)</code></td><td>경로 조각마다 <code>openat(O_NOFOLLOW)</code></td></tr>
+            <tr><td>CGI 실행</td><td>검증한 fd를 그대로 <code>fexecve</code></td><td>임시 폴더에 하드 링크 → 장치·inode 비교 → <code>execve</code></td></tr>
+            <tr><td>CGI 자식의 fd 닫기</td><td><code>close_range</code> 시스템 호출</td><td>하나씩 <code>close</code></td></tr>
+            <tr><td>조건 변수 시간 제한</td><td><code>CLOCK_MONOTONIC</code> 속성</td><td><code>pthread_cond_timedwait_relative_np</code></td></tr>
+            <tr><td>accept한 소켓의 논블로킹 상속</td><td>상속 안 됨</td><td>상속될 수 있어 명시적으로 해제</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer>근거 코드: <code>src/</code> 20개 C 파일과 README, <code>Makefile</code>, <code>.github/workflows/ci.yml</code>. 시뮬레이터 두 개는 실제 함수의 판단 규칙을 옮긴 축소 모형이며 시간 단위를 단순화했습니다.</footer>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  /* ---------- 분기 시뮬레이터 (dispatch) ---------- */
+  const LOCAL_NAMES = ['localhost', '127.0.0.1'];
+  const PORT = '8080';
+  function decide(method, uri, fwd, routes) {
+    const rows = [];
+    let res;
+    const isAbs = /^http:\/\//i.test(uri);
+    rows.push({ q: '절대 URI인가? (<code>http://</code>로 시작)', s: isAbs ? 'yes' : 'no' });
+    let target = uri;
+    if (isAbs) {
+      const rest = uri.slice(7);
+      const cut = rest.search(/[\/?]/);
+      const auth = cut < 0 ? rest : rest.slice(0, cut);
+      target = cut < 0 ? '/' : rest.slice(cut);
+      if (target[0] === '?') target = '/' + target;
+      const m = auth.match(/^([^:]*)(?::(\d+))?$/);
+      const host = (m ? m[1] : auth).toLowerCase();
+      const port = m && m[2] ? m[2] : '80';
+      const local = LOCAL_NAMES.includes(host) && port === PORT;
+      rows.push({ q: `이 서버 자신을 가리키는가? (호스트 <code>${esc(host || '?')}</code>, 포트 <code>${esc(port)}</code>)`, s: local ? 'yes' : 'no' });
+      if (!local) {
+        rows.push({ q: '라우팅 규칙 <code>/api/</code>와 일치하는가?', s: 'skip' });
+        rows.push({ q: '<code>/cgi-bin/</code>으로 시작하는가?', s: 'skip' });
+        res = fwd
+          ? { ok: true, t: 'Forward Proxy로 전달', fn: 'forward_proxy_request()', d: `DNS로 <code>${esc(host)}:${esc(port)}</code>를 찾아 연결하고, 요청 줄을 <code>${esc(method)} ${esc(target)}</code>로 바꿔 보냅니다. 응답 후 연결을 닫습니다.` }
+          : { ok: false, t: '403 Forbidden', fn: 'dispatch() → 403', d: '외부 목적지로 대신 접속하는 기능은 <code>-f</code>로 켜야 합니다. 켜지 않으면 열린 프록시로 악용되지 않게 거절합니다.' };
+        return { rows, res };
+      }
+    } else {
+      rows.push({ q: '이 서버 자신을 가리키는가?', s: 'skip' });
+    }
+    const path = target.split('?')[0];
+    const api = routes && path.startsWith('/api/');
+    rows.push({ q: routes ? '라우팅 규칙 <code>/api/</code>와 일치하는가? (가장 긴 접두사)' : '라우팅 규칙과 일치하는가? (<code>-c</code> 없음)', s: api ? 'yes' : 'no' });
+    if (api) {
+      rows.push({ q: '<code>/cgi-bin/</code>으로 시작하는가?', s: 'skip' });
+      res = { ok: true, t: 'Reverse Proxy로 전달', fn: 'reverse_proxy_request()', d: `<code>127.0.0.1:8001</code>과 <code>8002</code> 중 라운드로빈으로 고른 백엔드에 <code>${esc(method)} ${esc(target)}</code>를 보냅니다. 응답 후 연결을 닫습니다.` };
+      return { rows, res };
+    }
+    const cgi = path.startsWith('/cgi-bin/');
+    rows.push({ q: '<code>/cgi-bin/</code>으로 시작하는가?', s: cgi ? 'yes' : 'no' });
+    if (cgi) {
+      res = { ok: true, t: 'CGI 프로그램 실행', fn: 'serve_cgi_at()', d: `<code>cgi-bin${esc(path.slice(8))}</code>을 새 프로세스로 실행하고 출력을 중계합니다. CGI가 본문 길이를 명시하면 같은 연결에서 다음 요청을 받을 수 있습니다.` };
+    } else if (method === 'POST') {
+      res = { ok: false, t: '405 Method Not Allowed', fn: 'serve_static_at() → 405', d: '정적 파일은 GET과 HEAD만 받습니다.' };
+    } else {
+      const file = path.endsWith('/') ? path + 'index.html' : path;
+      res = { ok: true, t: '정적 파일 제공', fn: 'serve_static_at()', d: `<code>www${esc(file)}</code>를 안전하게 열어 보냅니다${method === 'HEAD' ? '(HEAD라 헤더만)' : ''}. keep-alive 연결에서는 이어지는 요청도 처리합니다.` };
+    }
+    return { rows, res };
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  function renderDispatch() {
+    const { rows, res } = decide($('method').value, $('uri').value.trim() || '/', $('fwd').checked, $('routes').checked);
+    const label = { yes: '예', no: '아니오', skip: '건너뜀' };
+    $('checks').innerHTML = rows.map((r) => `<div class="check ${r.s}"><span class="st">${label[r.s]}</span><span>${r.q}</span></div>`).join('');
+    const box = $('result');
+    box.className = 'result' + (res.ok ? '' : ' bad');
+    box.innerHTML = `<b>${res.t}</b><span class="fn">${res.fn}</span><span>${res.d}</span>`;
+  }
+  ['method', 'uri', 'fwd', 'routes'].forEach((id) => $(id).addEventListener('input', renderDispatch));
+  document.querySelectorAll('[data-u]').forEach((b) => b.addEventListener('click', () => { $('uri').value = b.dataset.u; renderDispatch(); }));
+  renderDispatch();
+
+  /* ---------- 스레드 풀 시뮬레이터 ---------- */
+  const W = 4, CAP = 6;
+  let workers, queue, nextId, stats, logs, timer = null;
+  function poolInit() {
+    workers = [
+      { s: 'busy', c: 1, t: 0, d: 3 },
+      { s: 'ka', c: 2, t: 0 },
+      { s: 'busy', c: 3, t: 1, d: 3 },
+      { s: 'ka', c: 4, t: 0 }
+    ];
+    queue = [5];
+    nextId = 6;
+    stats = { served: 0, yielded: 0, rejected: 0 };
+    logs = [];
+    log('#5 accept → 대기열에 넣음 (워커가 모두 연결을 맡고 있음)', 'y');
+    log('#2, #4는 응답을 보낸 뒤 다음 요청을 기다리는 중', '');
+  }
+  function log(text, cls) {
+    logs.push({ text, cls });
+    if (logs.length > 60) logs.shift();
+  }
+  function assign() {
+    for (const w of workers) {
+      if (w.s === 'idle' && queue.length) {
+        const c = queue.shift();
+        Object.assign(w, { s: 'busy', c, t: 0, d: 2 + Math.floor(Math.random() * 3) });
+        log(`워커가 대기열에서 #${c}를 꺼냄`, 'g');
+      }
+    }
+  }
+  function arrive() {
+    const id = nextId++;
+    const idle = workers.filter((w) => w.s === 'idle').length;
+    if (queue.length - idle >= CAP) {
+      stats.rejected++;
+      log(`#${id} 대기열 가득 참 → 메인 스레드가 503 전송 후 닫음`, 'r');
+    } else {
+      queue.push(id);
+      log(`#${id} accept → threadpool_submit`, '');
+      assign();
+    }
+  }
+  function step() {
+    for (const w of workers) {
+      if (w.s === 'busy') {
+        w.t++;
+        if (w.t >= w.d) {
+          stats.served++;
+          if (queue.length) {
+            stats.yielded++;
+            log(`#${w.c} 응답을 Connection: close로 보냄 (기다리는 연결에 양보)`, 'y');
+            Object.assign(w, { s: 'idle', c: null });
+          } else {
+            log(`#${w.c} 응답 완료, 같은 연결의 다음 요청 대기`, '');
+            Object.assign(w, { s: 'ka', t: 0 });
+          }
+        }
+      } else if (w.s === 'ka') {
+        w.t++;
+        if (Math.random() < 0.3) {
+          log(`#${w.c} 같은 연결로 다음 요청 도착`, '');
+          Object.assign(w, { s: 'busy', t: 0, d: 1 + Math.floor(Math.random() * 2) });
+        } else if (queue.length) {
+          stats.yielded++;
+          log(`#${w.c} 100ms 넘게 조용 + 대기 연결 있음 → 닫고 양보`, 'y');
+          Object.assign(w, { s: 'idle', c: null });
+        } else if (w.t >= 6) {
+          log(`#${w.c} 5초 동안 요청 없음 → 연결 종료`, '');
+          Object.assign(w, { s: 'idle', c: null });
+        }
+      }
+    }
+    assign();
+  }
+  function renderPool() {
+    $('ring').innerHTML = Array.from({ length: CAP }, (_, i) => queue[i] ? `<div class="slot full">#${queue[i]}</div>` : '<div class="slot">·</div>').join('');
+    const label = { idle: '대기열을 기다리며 잠듦', busy: '요청 처리 중', ka: 'keep-alive 다음 요청 대기' };
+    $('workers').innerHTML = workers.map((w, i) => `<div class="worker ${w.s}"><span class="w">worker ${i + 1}${w.c ? ' · 연결 #' + w.c : ''}</span><span class="s">${label[w.s]}</span></div>`).join('');
+    const idle = workers.filter((w) => w.s === 'idle').length;
+    $('meter').innerHTML = `<span>처리한 요청 <b>${stats.served}</b></span><span>양보 <b>${stats.yielded}</b></span><span>503 <b>${stats.rejected}</b></span>`;
+    const waiting = queue.length > idle;
+    const f = $('waitFlag');
+    f.className = 'flag' + (waiting ? ' on' : '');
+    f.textContent = `has_waiting = count(${queue.length}) > idle(${idle}) → ${waiting ? '1' : '0'}`;
+    const box = $('poolLog');
+    box.innerHTML = logs.map((l) => `<div class="${l.cls}">${esc(l.text)}</div>`).join('');
+    box.scrollTop = box.scrollHeight;
+  }
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $('poolAuto').setAttribute('aria-pressed', 'false');
+    $('poolAuto').textContent = '자동 재생';
+  }
+  $('poolArrive').addEventListener('click', () => { arrive(); renderPool(); });
+  $('poolStep').addEventListener('click', () => { step(); renderPool(); });
+  $('poolReset').addEventListener('click', () => { stopAuto(); poolInit(); renderPool(); });
+  $('poolAuto').addEventListener('click', () => {
+    if (timer) return stopAuto();
+    $('poolAuto').setAttribute('aria-pressed', 'true');
+    $('poolAuto').textContent = '멈춤';
+    timer = setInterval(() => {
+      const rate = Number($('poolRate').value) / 100;
+      if (Math.random() < rate) arrive();
+      if (Math.random() < rate * 0.6) arrive();
+      step();
+      renderPool();
+    }, 750);
+  });
+  poolInit();
+  renderPool();
+
+  /* ---------- Reverse Proxy 시뮬레이터 ---------- */
+  const backs = [
+    { name: '127.0.0.1:8001', mode: 'ok', retry: 0 },
+    { name: '127.0.0.1:8002', mode: 'ok', retry: 0 }
+  ];
+  let rr = 0, clock = 0, lastUsed = -1;
+  const pxLogs = [];
+  const BUDGET = 5000;
+  function send() {
+    const start = clock;
+    const end = start + BUDGET;
+    const tried = new Set();
+    let first = null, connected = null, attempts = 0, error = 0, status = 0, prev = -1;
+    for (;;) {
+      if (clock >= end) { status = 504; break; }
+      const from = tried.size ? prev + 1 : rr;
+      const order = [];
+      for (let o = 0; o < backs.length; o++) {
+        const i = (from + o) % backs.length;
+        if (tried.has(i) || backs[i].retry > clock) continue;
+        order.push(i);
+      }
+      if (!order.length) { status = error || 502; break; }
+      const i = order[0];
+      if (!tried.size) rr = i + 1;
+      tried.add(i);
+      prev = i;
+      attempts++;
+      const b = backs[i];
+      if (!first) first = b.name;
+      const share = Math.max(1, Math.floor((end - clock) / order.length));
+      if (b.mode === 'ok') { clock += 1; connected = b.name; b.retry = 0; status = 200; lastUsed = i; break; }
+      if (b.mode === 'refused') { clock += 1; if (!error) error = 502; continue; }
+      clock += share;
+      error = 504;
+      if (clock < end) b.retry = clock + 5000;
+    }
+    if (!connected) lastUsed = -1;
+    const dur = clock - start;
+    const cls = status === 200 ? (attempts > 1 ? 'y' : 'g') : 'r';
+    pxLogs.push({ cls, text: `status=${status} first=${first || '-'} connected=${connected || '-'} attempts=${attempts} duration_ms=${dur}` });
+    if (pxLogs.length > 40) pxLogs.shift();
+    clock += 200;
+  }
+  function renderPx() {
+    const modes = [['ok', '정상'], ['refused', '연결 거부'], ['timeout', '응답 없음']];
+    $('backs').innerHTML = backs.map((b, i) => {
+      const cool = b.retry > clock;
+      const st = cool ? `제외 중 · ${((b.retry - clock) / 1000).toFixed(1)}초 남음` : '선택 대상';
+      return `<div class="back${cool ? ' cool' : ''}${lastUsed === i ? ' last' : ''}"><span class="bname">${b.name}</span><span class="bstate">${st}${lastUsed === i ? ' · 방금 응답함' : ''}</span><div class="seg" role="group" aria-label="${b.name} 상태">${modes.map(([m, l]) => `<button data-b="${i}" data-m="${m}" aria-pressed="${b.mode === m}">${l}</button>`).join('')}</div></div>`;
+    }).join('');
+    $('backs').querySelectorAll('button[data-b]').forEach((btn) => btn.addEventListener('click', () => { backs[+btn.dataset.b].mode = btn.dataset.m; renderPx(); }));
+    $('pxClock').textContent = `모형 시계 ${(clock / 1000).toFixed(1)}초 · 다음 시작 후보 ${backs[rr % backs.length].name}`;
+    const box = $('pxLog');
+    box.innerHTML = pxLogs.map((l) => `<div class="${l.cls}">access event=request method=GET path=/api/ ${esc(l.text)}</div>`).join('');
+    box.scrollTop = box.scrollHeight;
+  }
+  $('pxSend').addEventListener('click', () => { send(); renderPx(); });
+  $('pxWait').addEventListener('click', () => { clock += 5000; renderPx(); });
+  send(); send();
+  backs[0].mode = 'timeout';
+  send();
+  renderPx();
+
+  /* ---------- SVG 공통 ---------- */
+  const NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, text) {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  /* ---------- 시간 예산 간트 ---------- */
+  (function gantt() {
+    const svg = $('gantt');
+    const X0 = 190, PX = 18, W = X0 + 30 * PX + 20, ROW = 46, TOP = 30;
+    const lanes = [
+      { name: '요청 받기', sub: '연결마다 반복', bars: [[0, 5, 'var(--accent)', '첫 바이트 대기'], [5, 10, 'var(--amber)', '요청 줄+헤더'], [10, 15, 'var(--violet)', '본문']], end: '넘으면 408' },
+      { name: '프록시 연결', sub: 'DNS → 연결 → 응답 헤더', bars: [[0, 2.5, 'var(--accent)', '후보 1'], [2.5, 5, 'var(--green)', '후보 2']], end: '넘으면 504' },
+      { name: '응답 중계', sub: '프록시·CGI 공통', bars: [[0, 30, 'var(--green)', '전체 상한 30초 (멈춤 5초면 중단)']], end: '' },
+      { name: 'CGI 실행 확인', sub: 'exec 성공 여부', bars: [[0, 5, 'var(--violet)', '최대 5초']], end: '' },
+      { name: '종료 유예', sub: 'SIGTERM 이후', bars: [[0, 5, 'var(--red)', '공통 5초']], end: '이후 강제 정리' }
+    ];
+    const H = TOP + lanes.length * ROW + 30;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('style', `width:100%;min-width:640px;height:auto`);
+    for (let s = 0; s <= 30; s += 5) {
+      const x = X0 + s * PX;
+      svg.appendChild(el('line', { x1: x, y1: TOP - 8, x2: x, y2: H - 26, stroke: 'var(--line)', 'stroke-width': 1 }));
+      svg.appendChild(el('text', { x, y: H - 10, 'text-anchor': 'middle', 'font-size': 11.5, fill: 'var(--muted)', class: 't-mono' }, s + '초'));
+    }
+    lanes.forEach((l, i) => {
+      const y = TOP + i * ROW;
+      svg.appendChild(el('text', { x: 0, y: y + 15, 'font-size': 13, 'font-weight': 600, fill: 'var(--ink)' }, l.name));
+      svg.appendChild(el('text', { x: 0, y: y + 31, 'font-size': 11.5, fill: 'var(--muted)' }, l.sub));
+      let lastX = X0;
+      l.bars.forEach(([a, b, color, label]) => {
+        const x = X0 + a * PX, w = (b - a) * PX;
+        svg.appendChild(el('rect', { x: x + 1, y: y + 4, width: w - 2, height: 26, rx: 4, fill: color, 'fill-opacity': 0.22, stroke: color }));
+        if (w > 40) svg.appendChild(el('text', { x: x + 7, y: y + 21, 'font-size': 11.5, fill: 'var(--ink)' }, label));
+        lastX = x + w;
+      });
+      if (l.end) svg.appendChild(el('text', { x: lastX + 8, y: y + 21, 'font-size': 11.5, 'font-weight': 600, fill: 'var(--red)' }, l.end));
+    });
+  })();
+
+  /* ---------- 부하 측정 막대 그래프 ---------- */
+  (function loadChart() {
+    const data = [
+      [1, 5490, 12991], [8, 12202, 38253], [9, null, 10165], [32, 11966, 12068],
+      [64, 11944, 11887], [100, 12206, 12019], [256, 11212, 11730]
+    ];
+    const svg = $('loadChart');
+    const L = 64, R = 16, T = 24, B = 46, W = 760, H = 320;
+    const PW = W - L - R, PH = H - T - B, MAX = 40000;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('style', 'width:100%;min-width:600px;height:auto');
+    const y = (v) => T + PH * (1 - v / MAX);
+    for (let v = 0; v <= MAX; v += 10000) {
+      svg.appendChild(el('line', { x1: L, y1: y(v), x2: W - R, y2: y(v), stroke: 'var(--line)', 'stroke-width': 1 }));
+      svg.appendChild(el('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11.5, fill: 'var(--muted)', class: 't-mono' }, v.toLocaleString('ko-KR')));
+    }
+    const gw = PW / data.length, bw = Math.min(30, gw * 0.32);
+    data.forEach(([c, a, k], i) => {
+      const cx = L + gw * i + gw / 2;
+      [[a, 'var(--muted)', -1], [k, 'var(--accent)', 1]].forEach(([v, color, side]) => {
+        const x = cx + (side < 0 ? -bw - 2 : 2);
+        if (v == null) {
+          svg.appendChild(el('text', { x: x + bw / 2, y: y(0) - 6, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--muted)' }, '—'));
+          return;
+        }
+        svg.appendChild(el('rect', { x, y: y(v), width: bw, height: y(0) - y(v), rx: 2, fill: color, 'fill-opacity': side < 0 ? 0.55 : 0.9 }));
+      });
+      svg.appendChild(el('text', { x: cx, y: H - B + 18, 'text-anchor': 'middle', 'font-size': 12.5, fill: 'var(--ink)', class: 't-mono' }, c));
+    });
+    svg.appendChild(el('text', { x: L + PW / 2, y: H - 8, 'text-anchor': 'middle', 'font-size': 12, fill: 'var(--muted)' }, '동시 연결 수 (ab -c)'));
+    svg.appendChild(el('text', { x: 12, y: T - 8, 'font-size': 12, fill: 'var(--muted)' }, '건/초'));
+    const px = L + gw * 1 + gw / 2 + 2 + bw / 2;
+    svg.appendChild(el('text', { x: px + 22, y: y(38253) + 4, 'font-size': 12, 'font-weight': 600, fill: 'var(--accent)' }, '38,253 · 워커 수와 같음'));
+    const nx = L + gw * 2 + gw / 2 + 2 + bw / 2;
+    svg.appendChild(el('text', { x: nx + 22, y: y(10165) - 34, 'font-size': 12, 'font-weight': 600, fill: 'var(--amber)' }, '10,165 · 워커보다 1개 많음'));
+    svg.appendChild(el('line', { x1: nx + 20, y1: y(10165) - 30, x2: nx + 4, y2: y(10165) - 4, stroke: 'var(--amber)', 'stroke-width': 1.2 }));
+  })();
+})();
+</script>
