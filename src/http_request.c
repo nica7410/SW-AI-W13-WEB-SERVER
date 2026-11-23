@@ -1,6 +1,7 @@
 #include "http_request_internal.h"
 #include "forward_proxy.h"
 #include "http_fields.h"
+#include "http_framing.h"
 #include "proxy_internal.h"
 #include "server.h"
 #include <errno.h>
@@ -63,7 +64,7 @@ const char *get_header(const http_request *req, const char *name) {
     return NULL;
 }
 
-int parse_header_line(const char *line, http_request *req) {
+static int parse_field(const char *line, http_header *h) {
     size_t len = strcspn(line, "\r\n");
     if (line[len] && strcmp(line + len, "\r\n")) return 400;
     const char *colon = memchr(line, ':', len);
@@ -73,22 +74,30 @@ int parse_header_line(const char *line, http_request *req) {
     while (value < end && (*value == ' ' || *value == '\t')) value++;
     while (end > value && (end[-1] == ' ' || end[-1] == '\t')) end--;
     size_t value_len = (size_t)(end - value);
-    if (req->header_count >= MAX_HEADERS || name_len >= MAX_HEADER_NAME ||
+    if (name_len >= MAX_HEADER_NAME ||
         value_len >= MAX_HEADER_VALUE) return 431;
     for (const char *p = line; p < colon; p++)
         if (!is_field_char((unsigned char)*p)) return 400;
     for (const char *p = value; p < end; p++)
         if (((unsigned char)*p < 32 && *p != '\t') || *p == 127) return 400;
 
-    http_header *h = &req->headers[req->header_count];
     memcpy(h->name, line, name_len);
     h->name[name_len] = '\0';
     memcpy(h->value, value, value_len);
     h->value[value_len] = '\0';
+    return 0;
+}
+
+int parse_header_line(const char *line, http_request *req) {
+    if (req->header_count == MAX_HEADERS) return 431;
+    http_header *h = &req->headers[req->header_count];
+    int status = parse_field(line, h);
+    if (status) return status;
+    size_t value_len = strlen(h->value);
     if (!strcasecmp(h->name, "Content-Length")) {
         if (!value_len || get_header(req, h->name)) return 400;
         size_t n = 0;
-        for (const char *p = value; p < end; p++) {
+        for (const char *p = h->value; *p; p++) {
             if (*p < '0' || *p > '9') return 400;
             n = n * 10 + (size_t)(*p - '0');
             if (n > MAX_BODY_LEN) return 413;
@@ -137,6 +146,72 @@ int read_request_head_until(rio_t *rp, http_request *req, deadline_ms end) {
     }
 }
 
+static int read_body_bytes(rio_t *rp, char *out, size_t n, deadline_ms end) {
+    ssize_t got = rio_readn_until(rp, out, n, end);
+    if (got == (ssize_t)n) return 0;
+    return got < 0 && errno == ETIMEDOUT ? 408 : -1;
+}
+
+static int request_coding(const http_request *req) {
+    int chunked = 0, unsupported = 0;
+    if (get_header(req, "Content-Length") || !strcmp(req->version, "HTTP/1.0")) return 400;
+    for (int i = 0; i < req->header_count; i++) {
+        const http_header *h = &req->headers[i];
+        if (strcasecmp(h->name, "Transfer-Encoding")) continue;
+        if (!parse_transfer_codings(h->value, &chunked)) return 400;
+        if (strcasecmp(h->value, "chunked")) unsupported = 1;
+    }
+    if (!chunked) return 400;
+    return unsupported ? 501 : 0;
+}
+
+static int read_trailers(rio_t *rp, deadline_ms end) {
+    char line[MAX_LINE + 1];
+    for (int count = 0; ; count++) {
+        int status = read_line(rp, line, 431, end);
+        if (status || !strcmp(line, "\r\n")) return status;
+        if (count == MAX_HEADERS) return 431;
+        http_header h;
+        status = parse_field(line, &h);
+        if (status) return status;
+        if (!strcasecmp(h.name, "Content-Length") || !strcasecmp(h.name, "Transfer-Encoding") ||
+            !strcasecmp(h.name, "Host") || !strcasecmp(h.name, "Connection") ||
+            !strcasecmp(h.name, "Trailer")) return 400;
+        // Accepted trailers are consumed separately and never merged into request headers.
+    }
+}
+
+static int read_chunked_request(rio_t *rp, http_request *req, deadline_ms end) {
+    size_t capacity = 0;
+    for (;;) {
+        char line[MAX_LINE + 1];
+        if (!deadline_left(end)) return 408;
+        int status = read_line(rp, line, 400, end);
+        if (status) return status;
+        line[strlen(line) - 2] = '\0';
+        uintmax_t chunk;
+        if (!parse_chunk_size(line, &chunk)) return 400;
+        if (!chunk) return read_trailers(rp, end);
+        if (chunk > MAX_BODY_LEN - req->content_length) return 413;
+        size_t needed = req->content_length + (size_t)chunk;
+        if (needed > capacity) {
+            capacity = capacity ? capacity * 2 : 4096;
+            if (capacity < needed) capacity = needed;
+            if (capacity > MAX_BODY_LEN) capacity = MAX_BODY_LEN;
+            char *body = realloc(req->body, capacity);
+            if (!body) return 500;
+            req->body = body;
+        }
+        status = read_body_bytes(rp, req->body + req->content_length, (size_t)chunk, end);
+        if (status) return status;
+        req->content_length = needed;
+        char crlf[2];
+        status = read_body_bytes(rp, crlf, sizeof(crlf), end);
+        if (status) return status;
+        if (memcmp(crlf, "\r\n", 2)) return 400;
+    }
+}
+
 int read_request(rio_t *rp, http_request *req) {
     *req = (http_request){0};
     if (!rp->cnt && wait_until(rp->fd, POLLIN, deadline_after(KEEPALIVE_TIMEOUT_SEC * 1000)) < 0)
@@ -144,32 +219,30 @@ int read_request(rio_t *rp, http_request *req) {
     int status = read_request_head_until(rp, req, deadline_after(REQUEST_HEADER_TIMEOUT_MS));
     if (status) return status;
     if (!strcmp(req->version, "HTTP/1.1") && !get_header(req, "Host")) return 400;
-    if (get_header(req, "Transfer-Encoding"))
-        return get_header(req, "Content-Length") ? 400 : 501;
-    if (!strcmp(req->method, "POST") && !get_header(req, "Content-Length")) return 411;
+    int chunked = get_header(req, "Transfer-Encoding") != NULL;
+    if (chunked) {
+        status = request_coding(req);
+        if (status) return status;
+    } else if (!strcmp(req->method, "POST") && !get_header(req, "Content-Length")) return 411;
 
     const char *expect = get_header(req, "Expect");
     if (expect && strcasecmp(expect, "100-continue")) return 417;
-    if (req->content_length) {
+    if (!chunked && !req->content_length) return 0;
+    if (!chunked) {
         req->body = malloc(req->content_length);
         if (!req->body) return 500;
-        static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
-        if (expect && strcmp(req->version, "HTTP/1.0") &&
-            send_until(rp->fd, interim, sizeof(interim) - 1, INT64_MAX) < 0) goto body_io_error;
-        ssize_t got = rio_readn_until(rp, req->body, req->content_length,
-                                      deadline_after(REQUEST_BODY_TIMEOUT_MS));
-        if (got != (ssize_t)req->content_length) {
-            // EOF로 짧게 끝난 경우(got >= 0)의 errno는 이전 호출의 값이므로 보지 않는다.
-            if (got >= 0 || errno != ETIMEDOUT) goto body_io_error;
-            free_request(req);
-            return 408;
-        }
     }
-    return 0;
-
-body_io_error:
-    free_request(req);
-    return -1;
+    static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
+    if (expect && strcmp(req->version, "HTTP/1.0") &&
+        send_until(rp->fd, interim, sizeof(interim) - 1, INT64_MAX) < 0) {
+        free_request(req);
+        return -1;
+    }
+    deadline_ms end = deadline_after(REQUEST_BODY_TIMEOUT_MS);
+    status = chunked ? read_chunked_request(rp, req, end)
+                     : read_body_bytes(rp, req->body, req->content_length, end);
+    if (status) free_request(req);
+    return status;
 }
 
 void free_request(http_request *req) {

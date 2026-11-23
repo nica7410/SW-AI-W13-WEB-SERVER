@@ -82,6 +82,7 @@ expect "$(fetch --request-target "http://localhost:$a/cgi-bin/adder?a=1&b=2" "ht
 expect "$(fetch -o /dev/null -w '%{http_code}' "$base/self/")" 508 self-route
 expect "$(fetch -o /dev/null -w '%{http_code}' "$base/mixed/")" 502 cycle-and-unavailable
 expect "$(fetch -o /dev/null -w '%{http_code}' "$base/cycle/")" 508 two-proxy-cycle
+expect "$(proxy_get "$port" -f -H 'Transfer-Encoding: chunked' -d 'a=12&b=30' "http://127.0.0.1:$b/cgi-bin/adder")" 42 chunked-forward-post
 
 jobs_to_wait=()
 for file in index.html style.css app.js; do
@@ -110,7 +111,7 @@ for request, status in [
     (b"BAD\r\n\r\n", 400),
     (b"GET / HTTP/1.1\r\n\r\n", 400),
     (b"POST / HTTP/1.1\r\nHost: h\r\n\r\n", 411),
-    (b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n", 501),
+    (b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501),
 ]:
     assert exchange(request).split(b" ", 2)[1] == str(status).encode()
 

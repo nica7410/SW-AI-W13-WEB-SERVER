@@ -15,7 +15,8 @@
 static int skip_header(const http_request *req, const char *name) {
     static const char *const local[] = {
         "Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authorization",
-        "Proxy-Authenticate", "TE", "Trailer", "Upgrade", "Expect", "Host", "Content-Length"
+        "Proxy-Authenticate", "TE", "Trailer", "Upgrade", "Expect", "Host", "Content-Length",
+        "Transfer-Encoding"
     };
     for (size_t i = 0; i < sizeof(local) / sizeof(local[0]); i++)
         if (!strcasecmp(name, local[i])) return 1;
@@ -60,7 +61,7 @@ static int write_request(int fd, const http_request *req, const char *target, de
         if (send_field(fd, "X-Forwarded-Proto", "http", end) < 0) return -1;
     }
     if (send_field(fd, "Via", line, end) < 0) return -1;
-    if (get_header(req, "Content-Length")) {
+    if (get_header(req, "Content-Length") || get_header(req, "Transfer-Encoding")) {
         snprintf(line, sizeof(line), "%zu", req->content_length);
         if (send_field(fd, "Content-Length", line, end) < 0) return -1;
     }

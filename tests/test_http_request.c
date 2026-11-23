@@ -197,6 +197,43 @@ static void test_body_deadline(void) {
     close(pair[1]);
 }
 
+static void test_chunked_request(void) {
+    static const char wire[] =
+        "POST /upload HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: Chunked\r\n\r\n"
+        "2;tag=\"x;y\"\r\na\0\r\n1\r\nb\r\n0\r\nX-Sum: ok\r\n\r\n"
+        "GET /next HTTP/1.1\r\nHost: h\r\n\r\n";
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) { CHECK(0); return; }
+    CHECK(rio_writen(pair[1], wire, sizeof(wire)-1) == (ssize_t)sizeof(wire)-1);
+    shutdown(pair[1], SHUT_WR);
+    rio_t in;
+    rio_readinitb(&in, pair[0]);
+    http_request req;
+    CHECK(read_request(&in, &req) == 0);
+    CHECK(req.content_length == 3 && req.body && !memcmp(req.body, "a\0b", 3));
+    CHECK(get_header(&req, "X-Sum") == NULL);
+    free_request(&req);
+    CHECK(read_request(&in, &req) == 0 && !strcmp(req.path, "/next"));
+    free_request(&req);
+    close(pair[0]);
+    close(pair[1]);
+}
+
+static void check_chunk_error(const char *fields_and_chunks, int expected) {
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) { CHECK(0); return; }
+    CHECK(dprintf(pair[1], "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n%s",
+                  fields_and_chunks) > 0);
+    shutdown(pair[1], SHUT_WR);
+    rio_t in;
+    rio_readinitb(&in, pair[0]);
+    http_request req;
+    CHECK(read_request(&in, &req) == expected);
+    CHECK(req.body == NULL);
+    close(pair[0]);
+    close(pair[1]);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_host_syntax();
@@ -204,6 +241,11 @@ int main(void) {
     test_expect("1.1", "HTTP/1.1 100 Continue\r\n\r\n");
     test_header_deadline();
     test_body_deadline();
+    test_chunked_request();
+    check_chunk_error("Content-Length: 0\r\n\r\n", 400);
+    check_chunk_error("\r\n100001\r\n", 413);
+    check_chunk_error("\r\n1\r\nx!!", 400);
+    check_chunk_error("\r\n0\r\nHost: changed\r\n\r\n", 400);
     test_body_io_error(0);
     test_body_io_error(1);
     test_request_lines();

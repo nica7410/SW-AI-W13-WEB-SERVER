@@ -5,6 +5,7 @@
 #include "proxy.h"
 #include "upstream.h"
 #include "http_fields.h"
+#include "http_framing.h"
 #include "http_response.h"
 #include <errno.h>
 #include <stdint.h>
@@ -89,80 +90,6 @@ static int body_to_client(rio_t *rio, int client, int known_length, uintmax_t le
     return 0;
 }
 
-static void skip_space(const char **p) {
-    *p += strspn(*p, " \t");
-}
-
-static int read_token(const char **p) {
-    const char *start = *p;
-    while (is_field_char((unsigned char)**p)) (*p)++;
-    return *p != start;
-}
-
-static int read_parameter(const char **p) {
-    if (**p != '"') return read_token(p);
-    (*p)++;
-    while (**p && **p != '"') {
-        if (**p == '\\') {
-            (*p)++;
-            if (!**p) return 0;
-        }
-        (*p)++;
-    }
-    if (**p != '"') return 0;
-    (*p)++;
-    return 1;
-}
-
-// Both transfer-coding parameters and chunk extensions allow quoted strings.
-static int read_parameters(const char **p, int value_required) {
-    skip_space(p);
-    while (**p == ';') {
-        (*p)++;
-        skip_space(p);
-        if (!read_token(p)) return 0;
-        skip_space(p);
-        if (**p == '=') {
-            (*p)++;
-            skip_space(p);
-            if (!read_parameter(p)) return 0;
-            skip_space(p);
-        } else if (value_required) return 0;
-    }
-    return 1;
-}
-
-static int transfer_codings(const char *p, int *chunked) {
-    for (;;) {
-        skip_space(&p);
-        const char *name = p;
-        if (*chunked || !read_token(&p)) return 0;
-        *chunked = p - name == 7 && !strncasecmp(name, "chunked", 7);
-        skip_space(&p);
-        if (*chunked && *p == ';') return 0;
-        if (!read_parameters(&p, 1)) return 0;
-        if (!*p) return 1;
-        if (*p++ != ',') return 0;
-    }
-}
-
-static int parse_chunk(const char *p, uintmax_t *size) {
-    const char *start = p;
-    uintmax_t n = 0;
-    for (;; p++) {
-        unsigned digit;
-        if (*p >= '0' && *p <= '9') digit = (unsigned)(*p - '0');
-        else if (*p >= 'a' && *p <= 'f') digit = (unsigned)(*p - 'a') + 10;
-        else if (*p >= 'A' && *p <= 'F') digit = (unsigned)(*p - 'A') + 10;
-        else break;
-        if (n > (UINTMAX_MAX - digit) / 16) return 0;
-        n = n * 16 + digit;
-    }
-    if (p == start || !read_parameters(&p, 0) || *p) return 0;
-    *size = n;
-    return 1;
-}
-
 static int write_line(int fd, deadline_ms end, const char *first, const char *second,
                       const char *third) {
     // A CGI status value can gain a protocol prefix, a space and CRLF on output.
@@ -176,7 +103,7 @@ static int chunked_body(rio_t *rio, int clientfd, struct fields *fields, deadlin
     char line[MAX_LINE + 1];
     for (;;) {
         uintmax_t size;
-        if (next_line(rio, line, 0, end) || !parse_chunk(line, &size)) return -1;
+        if (next_line(rio, line, 0, end) || !parse_chunk_size(line, &size)) return -1;
         if (!size) break;
         if (write_line(clientfd, end, line, "", "") < 0 ||
             body_to_client(rio, clientfd, 1, size, end) < 0) return -1;
@@ -249,7 +176,7 @@ int response_until(int clientfd, int source, const http_request *req, int from_c
         } else if (!strcasecmp(name, "Transfer-Encoding")) {
             if (from_cgi || !strcmp(req->version, "HTTP/1.0") ||
                 connection_field(&fields, name)) return error;
-            if (!transfer_codings(v, &chunked)) return error;
+            if (!parse_transfer_codings(v, &chunked)) return error;
             transfer_encoded = 1;
         } else if (from_cgi && !strcasecmp(name, "Status")) {
             code = status_code(v);

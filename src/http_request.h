@@ -1,4 +1,4 @@
-// [http_request.h] HTTP 요청 파서 — 요청 라인 / 헤더 / 본문(Content-Length)을 읽어 구조체로 만든다
+// [http_request.h] HTTP 요청 파서 — 요청 라인 / 헤더 / 본문(Content-Length 또는 chunked)을 읽어 구조체로 만든다
 //
 // ⚠ 공통 인터페이스: 이 구조체와 함수 시그니처는 모든 모듈이 사용한다. 바꾸면 모든 핸들러와 테스트를 함께 고쳐야 한다
 //
@@ -43,7 +43,7 @@ int parse_request_line(const char *line, http_request *req);
 // 헤더 한 줄("Host: localhost\r\n") 파싱 → headers에 추가. Content-Length, Connection이면 해당 필드도 갱신
 int parse_header_line(const char *line, http_request *req);
 
-// 소켓에서 요청 하나를 끝까지 읽기: 요청 라인 → 빈 줄까지 헤더 → Content-Length만큼 본문
+// 소켓에서 요청 하나를 끝까지 읽기: 요청 라인 → 빈 줄까지 헤더 → 길이 기반 본문 또는 chunked 본문 디코딩
 int read_request(rio_t *rp, http_request *req);
 
 // 헤더 값 찾기 (이름은 대소문자 무시). 없으면 NULL
