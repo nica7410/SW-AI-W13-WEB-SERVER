@@ -1,262 +1,487 @@
-# SW-AI-W13-WEB-SERVER
+# WEB SERVER
 
-POSIX 소켓 API만으로 처음부터 만든 C 웹서버 + Forward / Reverse Proxy (WEEK13 개인 프로젝트)
+**SW-AI LAB · WEEK 13 · TEAM 11**
 
-정적 파일과 CGI를 직접 제공하며, 설정에 따라 경로 기반 Reverse Proxy와 절대 URI 기반 Forward Proxy로도 동작합니다. 외부 HTTP·이벤트 루프 라이브러리 없이 표준 C 라이브러리와 POSIX API(`socket`, `pthread`, `poll`, `fork`/`execve`)만 사용합니다.
+C와 POSIX 소켓 API만으로 구현한 HTTP 웹서버  
+외부 HTTP 라이브러리 및 프레임워크 미사용
 
-## 설계
+| PEAK THROUGHPUT | AVERAGE LATENCY | FUNCTIONAL TESTS |
+| :---: | :---: | :---: |
+| **92,750 req/s** | **0.09 ms** | **145 / 145** |
+| 정적 파일 · 캐시 적용 | 동시 10연결 | 전체 통과 |
 
-| 요구사항 | 구현과 설계 선택 | 검증 근거 |
-|---|---|---|
-| TCP 수락과 동시 처리 | [수락 루프](src/server.c)가 연결을 [고정 크기 워커 풀](src/threadpool.c)에 넘깁니다. 새 연결이 기다리면 유휴 keep-alive 연결이 워커를 양보하고, 대기 큐까지 차면 새 연결에 503을 보냅니다. | [유휴 연결 양보·큐 초과 503](tests/functional.sh) |
-| HTTP 파싱과 응답 | [파서](src/http_request.c)는 빈 줄까지 헤더를 읽고 Content-Length 또는 chunked 인코딩에 따라 본문을 받습니다. [응답 작성기](src/http_response.c)는 상태와 본문 길이를 보냅니다. | [경계·시간 초과·연결 재사용](tests/test_http_request.c) |
-| 정적 파일과 CGI | [정적 핸들러](src/static_file.c)는 루트 안의 파일을 제공하고, [CGI 핸들러](src/cgi.c)는 별도 프로세스의 출력을 중계합니다. | [루트 경계·CGI 응답](tests/test_server_edges.c) |
-| Forward·Reverse Proxy | [Forward](src/forward_proxy.c)는 클라이언트를 대신해 원 서버에 접속합니다. [Reverse](src/proxy.c)는 서비스 앞에서 경로에 맞는 백엔드를 고르고 연결 실패 시 다음 후보를 시도합니다. Forward 캐싱은 과제의 선택 항목입니다. | [프록시 중계·장애 전환](tests/test_proxy_relay.c) |
-| 종료와 자원 회수 | [서버](src/server.c)가 새 연결 수락을 멈춥니다. 유예가 끝나 CGI를 중단하면 같은 그룹에 종료 신호를 보내고 직접 실행한 자식을 회수합니다. | [SIGTERM과 하위 프로세스 정리](tests/test_shutdown.py) |
+| UNIT CHECKS | MEMORY CHECK | MUTATION TESTS |
+| :---: | :---: | :---: |
+| **약 730** | **0 / 0** | **61 / 63** |
+| 전체 통과 | 오류 / 누수 | 변이 검출 |
 
-요청 크기와 시간 상한, 지원 메서드는 아래에 정리했습니다. [처리 범위와 한계](#처리-범위와-한계)
+*측정 조건: WSL2 · 워커 8개 · 동시 10연결 · Keep-Alive · GET / 306바이트. 이하 수치는 원본 README의 보고값입니다.*
 
-### TCP와 동시성
+| HTTP | 동시성 | 정적·동적 콘텐츠 | 프록시 |
+| :---: | :---: | :---: | :---: |
+| HTTP/1.0 · 1.1 | Thread Pool | Static File · CGI | Reverse · Forward |
+| GET · POST · HEAD | Keep-Alive | Thread-local Cache | Round-Robin · Failover |
 
-클라이언트와 서버의 커널이 SYN, SYN-ACK, ACK를 교환하면 TCP 연결이 성립합니다. `listen()`은 연결을 받을 소켓을 준비하고, `accept()`는 연결 대기열에서 소켓 하나를 꺼냅니다. 서버는 리스닝 소켓을 논블로킹으로 두고 `poll()`로 준비 상태를 기다립니다. 대기열이 비어 있으면 `accept()`는 즉시 돌아오므로 수락 루프가 종료 요청도 확인할 수 있습니다. `SO_REUSEADDR`는 이전 연결이 정리되는 동안 같은 주소에 서버를 다시 띄우는 데 쓰입니다. 같은 주소와 포트에서 다른 서버가 이미 수신 중이면 기동에 실패합니다. [소켓 생성](src/net.c) · [수락 루프](src/server.c)
+[01 구조](#01-전체-구조) · [02 설계](#02-핵심-설계) · [03 성능](#03-성능-최적화) · [04 검증](#04-품질-검증) · [05 회고](#05-회고) · [상세 문서](#상세-문서)
 
-| 동시성 모델 | 연결이 기다리는 동안의 비용 |
-|---|---|
-| 연결별 프로세스 | 독립된 주소 공간을 갖습니다. 연결을 받을 때마다 프로세스를 생성하고 종료 시 회수해야 합니다. |
-| 고정 스레드 풀 | 워커를 재사용하고 메모리를 공유합니다. 대기 중인 읽기·쓰기나 CGI가 워커 하나를 점유합니다. |
-| 이벤트 루프 | 적은 스레드가 많은 소켓의 준비 상태를 감시합니다. 파일 I/O와 CGI도 루프를 막지 않게 분리해야 합니다. |
+---
 
-이 서버는 정적 파일 읽기, CGI 실행, 프록시 전달을 순서대로 구현하면서 동시 실행 수를 제한하기 위해 스레드 풀을 사용합니다. 기본 워커는 8개입니다. 한 과거 측정에서 keep-alive 동시 연결이 8개에서 9개로 늘자 처리량이 39,501건/초에서 10,564건/초로 내려갔습니다. 새 연결이 기다릴 때 워커가 기존 연결을 닫아 양보하면 연결 재사용의 이득이 줄어듭니다. 동시 연결 1만 개(C10K)를 고려할 때는 열린 파일 한도, 대기 큐, 워커를 점유하는 I/O 시간을 함께 봐야 합니다. 아래 표에는 실제로 측정한 동시 연결 수를 표시했습니다. [부하 측정 조건과 결과](#검증)
+## 01. 전체 구조
 
-### 두 프록시의 쓰임
+> 메인 스레드는 연결 수락만 담당하고, 워커가 HTTP 요청을 처리합니다. 요청 유형에 따라 네 가지 처리 경로를 선택합니다.
 
-| 방식 | 이 프로젝트의 처리 | 대표적인 활용 |
-|---|---|---|
-| Forward Proxy | 클라이언트가 요청한 외부 HTTP 서버에 대신 접속합니다. `-f`로 허용합니다. | 조직의 외부 접근 정책 적용, 여러 클라이언트가 원 서버 응답을 재사용하는 공유 캐시 |
-| Reverse Proxy | 서비스의 경로 규칙에 맞춰 백엔드를 선택하고 연결 실패 시 다른 후보를 시도합니다. | 백엔드 주소 은닉, 부하 분산, 서비스 앞단에서 반복 응답 캐싱 |
-
-두 프록시는 전달하는 요청의 `Via`에 수신 IP·포트와 서버 인스턴스 식별자를 기록합니다. 워커가 자기 식별자를 다시 읽으면 다른 로컬 IP로 들어온 요청도 다음 백엔드에 연결하기 전에 508로 끝냅니다. 중간 서버가 식별자 주석을 제거한 경우에는 소켓 주소로 순환을 검사합니다. Reverse Proxy가 백엔드 후보에서 순환을 발견하면 남은 후보를 시도하며, 순환 후보만 있으면 508을 반환합니다. 캐싱은 과제 선택 항목입니다.
-
-## 요청 처리 흐름
-
-```
-main ─ 인자 파싱, 시그널 설정 (SIGPIPE 무시, SIGINT/SIGTERM → 안전 종료)
- └ run_server ─ open_listenfd → threadpool_create → accept 루프(TCP_NODELAY) → threadpool_submit
-      └ (워커) handle_connection ─ read_request (keep-alive 동안 반복, 대기 연결이 있으면 양보)
-            ├ 외부 절대 URI           → forward_proxy_request (-f 없으면 403)
-            ├ 자기 서버의 절대 URI    → 경로·쿼리와 Host를 복원하고 아래 규칙 적용
-            ├ 라우팅 규칙과 일치       → reverse_proxy_request  (→ 백엔드, Round-Robin)
-            ├ /cgi-bin/...            → serve_cgi
-            └ 그 외                   → serve_static
-```
-
-## 폴더 구조
-
-```
-src/
-  main.c                    진입점: 인자 파싱, 시그널
-  server.{h,c}              accept 루프, 연결 하나 처리(분기), keep-alive와 워커 양보
-  server_internal.h         정적·CGI 루트 디렉터리 고정, 오류 응답 내부 API
-  access_log.{h,c}          요청별 상태, 백엔드 연결 시도, 처리 시간 기록
-  threadpool.{h,c}          스레드 풀, 대기 연결 확인
-  net.{h,c}                 open_listenfd / open_clientfd, 마감 시간이 있는 DNS 조회·연결
-  rio.{h,c}                 short count 처리 read/write
-  deadline.{h,c}            단조 시계 기반 마감 시각, 마감이 있는 읽기·쓰기
-  http_request.{h,c}        요청 파서 (http_request_internal.h: 테스트용 내부 API)
-  http_fields.h             헤더 이름 문자·Connection 옵션 검사
-  http_framing.{h,c}        요청·응답이 공유하는 전송 인코딩과 청크 크기 파서
-  http_response.{h,c}       응답 생성, 오류 응답
-  mime.{h,c}                확장자 → Content-Type
-  static_file.{h,c}         정적 파일 서빙
-  local_path.{h,c}          URL 디코딩, 루트 밖 경로·심볼릭 링크 차단
-  cgi.{h,c}                 CGI 실행
-  cgi_location.c            CGI 외부 리디렉션 목적지의 URI 문법 검사
-  router.{h,c}              라우팅 규칙, Round-Robin
-  proxy.{h,c}               프록시 공통 중계 + Reverse Proxy, 502/504/508
-  proxy_identity.{h,c}      로컬 URI 판별, Via와 소켓 주소를 이용한 순환 검사
-  forward_proxy.{h,c}       절대 URI 파싱 + Forward Proxy (proxy_internal.h: host:port 파서)
-  response_stream.{h,c}     CGI·원 서버 응답 헤더 검증과 본문(chunked 포함) 중계 (upstream.h)
-tests/                      단위 테스트(test_*.c), 기능(functional.sh), 부하(load.sh)
-www/                        정적 파일 루트
-cgi-bin/                    CGI 프로그램
-conf/routes.conf            Reverse Proxy 라우팅 규칙
-docs/plans/project-review/  리뷰 지적 사항별 수정 계획과 결과
-.github/workflows/ci.yml    Ubuntu 단위·기능·종료·sanitizer 검사, macOS 일반 빌드·단위 검사
+```mermaid
+flowchart TB
+    C(["HTTP Client"]) --> A("Main Thread<br/>pselect · accept")
+    A --> Q("Connection Queue<br/>기본 1,024칸")
+    A -.->|"큐 포화"| BUSY("503 · Close")
+    Q --> W("Thread Pool<br/>기본 8 Workers")
+    W --> R("HTTP Parser<br/>RIO · read_request")
+    R --> D{"dispatch"}
+    subgraph HANDLERS["REQUEST HANDLERS"]
+        direction LR
+        S("Static File<br/>파일 · 캐시")
+        G("CGI<br/>fork · execve")
+        RP("Reverse Proxy<br/>라우팅 · 분산")
+        FP("Forward Proxy<br/>절대 URI")
+    end
+    D --> S
+    D --> G
+    D --> RP
+    D --> FP
+    S --> H("HTTP Response")
+    G --> H
+    RP --> P("proxy_relay<br/>공통 응답 중계")
+    FP --> P
+    H --> K{"연결 유지?"}
+    P --> K
+    K -->|"Keep-Alive"| R
+    K -->|"종료"| L("lingering_close")
+    classDef entry fill:#E8EFFA,stroke:#6483BD,stroke-width:1px,color:#223B64;
+    classDef core fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef feature fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
+    classDef proxy fill:#EEEAF8,stroke:#8B79B4,stroke-width:1px,color:#48376E;
+    classDef stop fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    class A,Q,W entry;
+    class R,D,H,K core;
+    class S,G feature;
+    class RP,FP,P proxy;
+    class BUSY,L stop;
 ```
 
-## 빌드 · 실행
+| 연결 관리 | HTTP 처리 | 콘텐츠 처리 | 프록시 처리 |
+| :--- | :--- | :--- | :--- |
+| `main.c` · `net.c` | `http_request.c` | `static_file.c` · `mime.c` | `router.c` · `proxy.c` |
+| `server.c` · `threadpool.c` | `rio.c` · `http_response.c` | `cgi.c` | `forward_proxy.c` |
 
-WSL2(Ubuntu) / Linux / macOS
+---
+
+## 02. 핵심 설계
+
+### 2-1. Thread Pool
+
+*연결이 몰려도 서버가 멈추지 않도록*
+
+```mermaid
+flowchart LR
+    C("Clients") --> B("Kernel Backlog") --> A("Main<br/>accept")
+    A -->|"submit"| Q("Bounded Queue<br/>1,024 connections")
+    A -.->|"Full"| X("503 즉시 반환")
+    Q --> W1("Worker 1")
+    Q --> W2("Worker 2")
+    Q --> WN("Worker 8")
+    classDef blue fill:#E8EFFA,stroke:#6483BD,stroke-width:1px,color:#223B64;
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    class B,A,Q blue;
+    class W1,W2,WN green;
+    class X red;
+```
+
+| 반복 서버 | 연결마다 스레드 | **Thread Pool (채택)** |
+| :---: | :---: | :---: |
+| 한 연결이 다음 연결을 막음 | 연결 증가 → 스레드 증가 | 워커 수 고정 + 유한 큐 |
+| 동시 처리 어려움 | 생성 비용 · 자원 고갈 | 재사용 · 과부하 제어 |
+
+- 메인: `socket → bind → listen → pselect → accept`. 워커는 작업이 없으면 `pthread_cond_wait`로 대기합니다.
+- 워커 8개(`-t`), 사용자 공간 큐 1,024칸(`-q`)은 기본값입니다. 커널 backlog와 별개의 큐입니다.
+- 큐 포화 시 메인 스레드를 막지 않고 503을 반환합니다. fd 고갈 시 100ms 대기로 busy loop를 방지합니다.
+
+
+### 2-2. HTTP 처리
+
+*하나의 연결로 여러 요청, 오류는 일관되게*
+
+```mermaid
+flowchart TB
+    A("연결 1개 수락<br/>8KB RIO 버퍼") --> B("요청 줄 → 헤더 → 본문")
+    B --> C{"read_request 반환값"}
+    C -->|"0 정상"| D("keep 결정 → dispatch → 응답")
+    C -->|"양수: HTTP 오류"| E("reply_error")
+    C -->|"-1: 끊김 · 유휴"| F("lingering_close")
+    E --> F
+    D --> G{"keep 및 hr 0 이상?"}
+    G -->|"예"| B
+    G -->|"아니오"| F
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    class A,B,C,D,G green;
+    class E,F red;
+```
+
+| 수신 유휴 | 송신 제한 | 요청 전체 마감² | 요청 크기 상한 |
+| :---: | :---: | :---: | :---: |
+| **5초** | **10초** | **10초** | 본문 **1MB** |
+
+² 원본 설명 기준 요청 줄 수신 후부터 적용. 송신 10초는 소켓 송신 타임아웃이며 응답 전송 전체의 절대 마감은 아닙니다.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Worker
+    C->>W: TCP 연결
+    C->>W: GET / (요청 1)
+    W-->>C: 200 OK · Keep-Alive
+    C->>W: GET / (요청 2)
+    W-->>C: 200 OK · Connection close
+    W-->>C: FIN (쓰기 종료)
+    Note over C,W: 남은 입력을 최대 1초 · 4MB까지 소비
+    W->>W: close · 워커 반환
+```
+
+**부하 대응:** 큐에 대기자가 있으면 응답 후 연결을 유지하지 않도록 결정해 다음 클라이언트에 워커를 양보합니다. 연결을 닫을 때는 남은 입력을 읽어 RST로 응답이 유실될 위험을 줄입니다.
+
+
+### 2-3. 요청 분기와 정적 파일
+
+*자주 쓰는 경로를 빠르게*
+
+```mermaid
+flowchart TD
+    A("dispatch") --> B{"절대 URI http:// ?"}
+    B -->|"Yes"| F("Forward Proxy<br/>-f 없으면 403")
+    B -->|"No"| C{"routes.conf 매칭?"}
+    C -->|"Yes"| R("Reverse Proxy")
+    C -->|"No"| D{"/cgi-bin/ ?"}
+    D -->|"Yes"| G("CGI")
+    D -->|"No"| S("Static File")
+    classDef proxy fill:#EEEAF8,stroke:#8B79B4,stroke-width:1px,color:#48376E;
+    classDef feature fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
+    class F,R proxy;
+    class G,S feature;
+```
+
+```mermaid
+flowchart LR
+    R("Static Request") --> C{"워커별 캐시<br/>유효한 항목?"}
+    C -->|"HIT"| H("메모리에서 응답")
+    C -->|"MISS"| F("realpath · open<br/>fstat · MIME")
+    F --> O("파일 읽기 · 응답")
+    O -.->|"64KB 이하 저장"| T("Thread-local Cache<br/>TTL 1초")
+    T -.->|"다음 요청"| C
+    classDef fast fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef disk fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
+    class C,H,T fast;
+    class F,O disk;
+```
+
+| 캐시 크기 상한(파일당) | 캐시 유효 시간 | 동기화 방식 |
+| :---: | :---: | :---: |
+| **64KB** | **1초** | **워커별 캐시 · 공유 락 없음** |
+
+캐시 미스에서는 실제 경로 및 루트 범위를 확인하고 일반 파일만 제공합니다. 캐시 히트는 반복되는 파일 접근 비용을 줄입니다. 파일 수정 후 최대 1초 동안 이전 내용이 제공될 수 있습니다.
+
+
+### 2-4. CGI
+
+*별도 프로세스 실행, 파이프 교착 방지*
+
+```mermaid
+flowchart LR
+    W("Worker<br/>환경변수 사전 준비") -->|"fork + execve"| P("CGI Process")
+    W -->|"stdin: POST body"| P
+    P -->|"stdout: CGI output"| V("Worker<br/>출력 수집 · 검증")
+    V --> R("HTTP 응답<br/>Content-Length")
+    V -.->|"5초 초과"| X("프로세스 그룹 종료<br/>504")
+    V -.->|"출력 오류 · 1MB 초과"| Y("502")
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef orange fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    class W,V,R green;
+    class P orange;
+    class X,Y red;
+```
+
+| 순차 파이프 I/O (문제) | `poll` 기반 동시 I/O (해결) |
+| :---: | :---: |
+| 쓰기 완료를 기다리면서 출력 파이프를 읽지 않음 | stdin 쓰기와 stdout 읽기를 함께 진행 |
+| 양쪽 버퍼가 차면 교착 가능 | 512KB POST 에코 테스트에서 교착 없음 |
+
+환경변수는 `fork` 전에 구성하고 자식은 `execve` 전 async-signal-safe 작업으로 제한합니다. CGI 출력은 서버가 검증한 뒤 응답하며, 시간 초과 시 프로세스 그룹 전체를 종료하고 `waitpid`로 회수합니다.
+
+
+### 2-5. Reverse / Forward Proxy
+
+*서로 다른 입구, 하나의 중계 엔진*
+
+```mermaid
+flowchart TB
+    subgraph REV["Reverse Proxy · 서버 측"]
+        C1("Client") --> R("Longest Prefix<br/>Round-Robin")
+        R --> B1("Backend 1")
+        R --> B2("Backend 2")
+    end
+    subgraph FWD["Forward Proxy · 클라이언트 측"]
+        C2("Client") --> F("절대 URI 파싱<br/>Host 재작성")
+        F --> O("Origin Server")
+    end
+    B1 --> P("공통 proxy_relay<br/>응답 검증 · 스트리밍")
+    B2 --> P
+    O --> P
+    P --> OUT("Client 응답")
+    classDef purple fill:#EEEAF8,stroke:#8B79B4,stroke-width:1px,color:#48376E;
+    class R,F,P purple;
+```
+
+```mermaid
+flowchart LR
+    A("요청 1") --> B("Backend 1")
+    C("요청 2") --> D("Backend 2")
+    E("요청 3") --> X("Backend 1<br/>연결 실패")
+    X -->|"Failover"| D
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    class X red;
+    class B,D green;
+```
+
+| 기능 | 설계 |
+| :--- | :--- |
+| Reverse | 최장 prefix 일치 → 원자적 Round-Robin 카운터 → 연결 실패 백엔드 건너뛰기 |
+| Forward | `http://host:port/path` 파싱 → Host 재작성 → 원 서버에 경로만 전송 (`-f` 필요) |
+| 공통 중계 | hop-by-hop 헤더 제거, 백엔드 `Connection: close`, 응답 헤더 검증, 본문 스트리밍 |
+| 장애 대응 | 모든 백엔드 연결 실패/잘못된 응답 **502** · connect/응답 헤더 마감 초과 **504** |
+
+Forward Proxy는 HTTP만 지원합니다. HTTPS CONNECT, TLS, 백엔드 연결 재사용은 구현 범위에 포함되지 않습니다.
+
+---
+
+## 03. 성능 최적화
+
+### 3-1. 측정 → 병목 분석 → 개선
+
+| 첫 번째 병목 | 두 번째 병목 | 세 번째 병목 |
+| :--- | :--- | :--- |
+| 작은 응답 약 40ms 지연 | 동시 100·500연결에서 503 약 89% | 정적 파일 약 3,000 req/s 정체 |
+| Nagle + Delayed ACK | Keep-Alive가 워커 점유 | WSL `/mnt/c` 파일 시스템 호출 |
+| `TCP_NODELAY` | 워커 양보 + 큐 1,024 | 워커별 작은 파일 캐시 |
+| **173 → 3,058 req/s** | **503 약 89% → 0건** | **3,120 → 92,750 req/s** |
+
+```mermaid
+flowchart LR
+    A("173 req/s<br/>초기 지연") -->|"TCP_NODELAY"| B("3,058 req/s")
+    C("3,120 req/s<br/>캐시 전 측정") -->|"Thread-local Cache"| D("92,750 req/s")
+    classDef stageBefore fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
+    classDef stageAfter fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    class A,C stageBefore;
+    class B,D stageAfter;
+```
+
+*각 행은 원본 README의 별도 전후 측정이며 하나의 동일 실험에서 연속 측정한 시계열은 아닙니다.*
+
+
+### 3-2. 부하 테스트
+
+*캐시 적용 전후*
+
+**정적 파일 처리량 (req/s)** · 전체 막대는 동일 척도
+
+| 동시 연결 | 캐시 전 | 캐시 후 | 개선 배수 |
+| :---: | :--- | :--- | :---: |
+| **10** | `▋` 3,120 | `████████████████████` **92,750** | **29.7×** |
+| **100** | `▋` 3,211 | `████████▉` **41,368** | **12.9×** |
+| **500** | `▋` 3,166 | `████████` **37,024** | **11.7×** |
+
+*막대 1칸 ≈ 4,638 req/s. 소수 칸은 근사 표시.*
+
+| 동시 10연결 평균 응답 지연 | 동시 500연결 정적 파일 | 보고된 부하 테스트 오류 |
+| :---: | :---: | :---: |
+| **0.09ms** | **37,024 req/s** | **503 0 · 소켓 오류 0** |
+
+*측정 환경: WSL2 · 워커 8개 · wrk 10초 · Keep-Alive · 정적 파일 GET / 306바이트.*
+
+### CGI / Reverse Proxy 추가 측정 (동시 100연결)
+
+| 대상 | 처리량 |
+| :--- | ---: |
+| 정적 파일 (캐시 후) | 41,368 req/s |
+| Reverse Proxy (백엔드 2개) | 약 16,800 req/s |
+| CGI `adder` | 약 1,250 req/s |
+
+각 요청의 처리 내용이 달라 성능 수치는 기능별 참고값이며 동일 작업의 성능 순위가 아닙니다.
+
+
+---
+
+## 04. 품질 검증
+
+### 4-1. 테스트 결과
+
+*기능뿐 아니라 실패 상황과 테스트 자체까지*
+
+| Functional | Unit | Sanitizer / Valgrind | Mutation |
+| :---: | :---: | :---: | :---: |
+| **145 / 145** | **약 730** | **0 오류 · 0 누수** | **61 / 63** |
+| 정상 · ASan 빌드 | 11개 테스트 파일 | 실제 서버 시나리오 | 나머지 2개 등가 변이로 보고 |
+
+```mermaid
+flowchart LR
+    A("정상 동작<br/>기능 · 단위 테스트") --> B("비정상 입력<br/>장애 · 과부하") --> C("자원 검사<br/>ASan · UBSan · Valgrind") --> D("테스트 검증<br/>Mutation Testing")
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    class A,B,C,D green;
+```
+
+
+### 4-2. 실제로 깨뜨려 본 시나리오
+
+| 공격·장애·경계 조건 | 서버 방어 | 검증 결과 |
+| :--- | :--- | :--- |
+| Slowloris · 요청 중단 | 요청 마감 | **408** |
+| 경로 탈출 · 루트 밖 심볼릭 링크 | 실제 경로 검사 | **403**, 내용 노출 없음 |
+| CGI 512KB 입력 / 출력 | `poll` 동시 I/O | 교착 없음 |
+| CGI 시간 초과 | 프로세스 그룹 종료 | **504**, 자식까지 종료 |
+| 잘못된 백엔드 응답 17종 | 공통 헤더 검증 | **502** |
+| 응답하지 않는 백엔드 | 헤더 마감 | **504** |
+| 워커·큐 포화 | 즉시 거부 | **503** |
+| SIGINT / SIGTERM | Graceful Shutdown | 시험에서 1초 이내 `exit 0` |
+
+
+### 4-3. Mutation Testing
+
+*테스트도 검증 대상*
+
+```mermaid
+flowchart TD
+    A("SIGPIPE 무시 처리 제거") --> B("기존 테스트 실행") --> C("테스트가 모두 통과<br/>검증 빈틈 발견")
+    C --> D("20MB 응답 중 클라이언트 연결 종료<br/>테스트 추가") --> E("같은 변이 재실행") --> F("변이 검출")
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    class C red;
+    class D,E,F green;
+```
+
+AI 교차 리뷰 역시 지적을 그대로 반영하지 않고 재현 또는 코드 확인을 거친 후 채택·기각했습니다.
+
+---
+
+## 05. 회고
+
+### 구현한 기능과 실제로 필요한 기능은 다르다
+
+```mermaid
+flowchart LR
+    subgraph R["Reverse Proxy · 일반적인 HTTPS 배치 예"]
+        A("HTTPS Client") --> B("TLS 종료 프록시<br/>사이트 인증서") --> C("HTTP Backend")
+    end
+    subgraph F["Forward Proxy · 이번 구현"]
+        D("HTTP Client") --> E("HTTP Forward Proxy") --> G("HTTP Origin")
+        H("HTTPS Client") -.->|"CONNECT 미지원"| X("처리 불가")
+    end
+    classDef green fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    classDef red fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
+    class B,C green;
+    class X red;
+```
+
+| Reverse Proxy | Forward Proxy |
+| :--- | :--- |
+| 이번 구현의 라우팅·분산·장애 우회는 HTTP 환경에서 실용적 | 이번 구현은 HTTP만 처리하므로 HTTPS 중심 웹에서 활용 범위가 제한적 |
+| 실제 배포에서 별도 TLS 종료 프록시와 조합 가능 | HTTPS를 중계하려면 CONNECT 터널링 등이 필요 |
+
+위 HTTPS Reverse 구성은 일반적인 배포 예시이며, **이 프로젝트 자체에는 TLS 종료 기능이 없습니다.**
+
+> **배운 점**
+>
+> 기능 수보다 사용 목적을 먼저 정의하고, 성능은 계측으로, 안정성은 재현 가능한 실패 테스트로 검증하는 것이 중요합니다.
+
+---
+
+## 상세 문서
+
+### 빌드 · 실행 · 데모 명령
+
+WSL2(Ubuntu) / Linux. 기능 테스트는 `/proc`와 `ss` 사용으로 Linux/WSL 전용입니다.
 
 ```bash
-make            # bin/server, cgi-bin/adder
-make test       # 단위 테스트
-make asan       # build/asan, bin/asan에 ASan·UBSan 빌드 후 단위 테스트
-make clean
-
-./bin/server -p 8080 -r ./www                          # 웹서버
-./bin/server -p 8080 -r ./www -c conf/routes.conf      # Reverse Proxy
-./bin/server -p 8080 -r ./www -f                       # Forward Proxy 허용
+make
+make test
+make asan
+bash tests/functional.sh
+SERVER=build/asan/server bash tests/functional.sh
+bash tests/load.sh
 ```
 
-절대 URI의 포트가 수신 포트와 같고 호스트가 로컬 IPv4 주소, `localhost`, 시스템 호스트 이름 또는 `-n`으로 지정한 이름이면 정적 파일·CGI·Reverse 라우팅 규칙을 적용합니다. 이때 백엔드에는 절대 URI에서 읽은 Host와 경로·쿼리를 보냅니다. 외부 목적지로의 전달은 `-f`로 켭니다.
-
-Reverse Proxy는 쿼리를 뺀 경로 문자열에서 가장 긴 접두사와 일치하는 규칙을 선택합니다. 설정에 같은 접두사가 반복되면 기동할 때 파일명과 줄 번호를 경고하고 첫 규칙을 사용합니다. 백엔드에는 접두사와 쿼리를 포함한 요청 대상을 전달합니다. 예를 들어 `/api/index.html?lang=ko`는 `/api/` 규칙으로 선택되고 백엔드도 같은 경로와 쿼리를 받습니다. 기본 설정으로 두 백엔드를 시연하려면 각각의 정적 루트에 `api/index.html`을 만들고 서로 다른 내용을 적은 뒤 8001번과 8002번에 띄웁니다.
-
-Reverse Proxy에 직접 접속하면 백엔드는 TCP 상대 주소와 프로토콜을 받습니다. 예를 들어 로컬 HTTP 요청에는 `X-Forwarded-For: 127.0.0.1`과 `X-Forwarded-Proto: http`가 한 번씩 들어갑니다. 클라이언트가 보낸 동명 헤더는 교체하고, 상대 IP를 확인할 수 없으면 주소 헤더를 생략합니다.
+```bash
+./bin/server -p 8080 -r ./www
+./bin/server -p 8080 -r ./www -c conf/routes.conf
+./bin/server -p 8080 -r ./www -f
+```
 
 ```bash
-curl http://127.0.0.1:8080/api/
-curl --noproxy '' -x http://127.0.0.1:8080 http://127.0.0.1:8001/api/
-curl -d 'a=1&b=2' http://127.0.0.1:8080/cgi-bin/adder    # 3
+curl http://127.0.0.1:8080/
+curl 'http://127.0.0.1:8080/cgi-bin/adder?a=1&b=2'
+curl -d 'a=40&b=2' http://127.0.0.1:8080/cgi-bin/adder
+curl http://127.0.0.1:8080/api/index.html
+curl -x 127.0.0.1:8080 http://127.0.0.1:8001/index.html
 ```
 
 | 옵션 | 기본값 | 의미 |
-|---|---|---|
+| :--- | :--- | :--- |
 | `-p` | 8080 | 포트 |
-| `-r` | ./www | 지정한 루트를 열 수 없으면 시작 실패. 옵션을 생략했을 때 기본 루트가 없으면 경고 후 기동 |
-| `-g` | ./cgi-bin | CGI 폴더를 열 수 없으면 경고 후 기동 |
-| `-c` | 없음 | 라우팅 설정 파일 (지정하면 Reverse Proxy 동작) |
-| `-f` | 꺼짐 | Forward Proxy 허용. 클라이언트가 지정한 내부 네트워크 주소에도 연결할 수 있음 |
-| `-n` | 없음 | 이 서버를 가리키는 추가 DNS 이름. 절대 URI는 수신 포트와 이름이 함께 일치해야 로컬로 처리 |
-| `-v` | 꺼짐 | 요청마다 접근 로그 한 줄을 stderr에 출력 |
-| `-t` | 8 | 워커 스레드 수 |
-| `-q` | 1024 | 연결 대기 큐 크기 (가득 차면 503). FD 한도 상향 후에도 공간이 부족하면 큐를 줄이고, 한 칸도 확보할 수 없으면 기동 실패 |
+| `-r` | `./www` | 정적 파일 루트 |
+| `-g` | `./cgi-bin` | CGI 폴더 |
+| `-c` | 없음 | Reverse 라우팅 설정 |
+| `-f` | 꺼짐 | Forward Proxy 허용 |
+| `-t` | 8 | 워커 수 |
+| `-q` | 1024 | 연결 대기 큐 |
 
-### 접근 로그로 분산과 장애 전환 확인하기
 
-`./bin/server -c conf/routes.conf -v`로 실행하면 다음과 같은 로그가 출력됩니다. `first`는 처음 연결을 시도한 백엔드, `connected`는 연결에 성공한 백엔드입니다. 세 번째 줄에서는 8001번 연결에 실패해 8002번에서 응답을 받았습니다.
+### 구현 모듈 · 세부 검증
 
-```text
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8001 attempts=1 duration_ms=1 request_read_ms=0
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8002 connected=127.0.0.1:8002 attempts=1 duration_ms=0 request_read_ms=0
-access event=request method=GET path=/api/ status=200 outcome=complete first=127.0.0.1:8001 connected=127.0.0.1:8002 attempts=2 duration_ms=2501 request_read_ms=0
-access event=overload method=- path=- status=503 outcome=complete first=- connected=- attempts=0 duration_ms=0
-```
+| Part | 파일 | 세부 구현 및 검증 |
+| :--- | :--- | :--- |
+| 1. 연결 수락 | `main.c`, `server.c`, `net.c`, `threadpool.c` | 잘못된 인자 30종 거부, 유효한 값 8종, 포트 충돌 및 재시작, `pselect` 시그널 마스크, fd 한도 CPU 0~1%, 스레드풀 20회 반복 |
+| 2. HTTP 파싱 | `http_request.c`, `rio.c` | short count, EINTR, Host 중복, Transfer-Encoding 요청 거부, 헤더 제어 문자 차단, 20KB 헤더 431, 3MB 본문 413, SIGPIPE 방어 |
+| 3. 정적 파일 | `static_file.c`, `mime.c`, `http_response.c` | 경로 검사, `open` 후 동일 fd `fstat`, FIFO non-blocking, MIME 20종, 64KB 캐시 경계, TTL 및 루트 분리, 파일 바이트 일치 |
+| 4. CGI | `cgi.c`, `cgi-bin/adder.c` | 환경변수, 512KB POST, 출력 1MB 경계, 5초 초과, 프로세스 그룹 종료, fd·좀비 검사, CLOEXEC, 시그널 복구 |
+| 5. 프록시 | `router.c`, `proxy.c`, `forward_proxy.c` | hop-by-hop 제거, Host, 300KB POST, 비정상 응답 17종, connect·헤더 5초, 8스레드 80만 Round-Robin 균등 분배, failover, URI 파싱 |
+| 6. 연결 종료 | `server.c`, `main.c` | 정적·CGI·Reverse·Forward Keep-Alive, 과부하 워커 양보, lingering close, graceful shutdown, fd 변화 없음 |
 
-큐가 가득 차면 요청을 읽기 전에 503을 보내므로 메서드와 경로가 `-`로 표시됩니다. 중간에 전송이 끊기면 `outcome=aborted`가 남습니다. 그때 `status=-`이면 최종 헤더를 다 보내기 전이고, `status=200`이면 200 헤더를 보낸 뒤입니다. 경로에서 쿼리를 빼고 본문과 요청 헤더도 생략합니다.
+반환 규칙: `0` 성공, 양수는 HTTP 오류 상태 코드, `-1`은 연결 종료. 요청 파싱 오류는 응답 후 연결을 닫고, 정상 파싱 후 핸들러 오류는 keep 조건에 따라 연결을 유지할 수 있습니다.
 
-`request_read_ms`는 첫 바이트가 준비된 뒤 요청 라인·헤더·본문을 읽고 파싱하는 데 걸린 밀리초입니다. 큐 대기와 다음 요청의 첫 바이트를 기다린 시간은 제외합니다. `duration_ms`는 요청 읽기가 끝난 시점부터 응답 처리와 정리를 마치고 로그를 쓰기 직전까지의 밀리초입니다. 큐 초과로 요청을 읽기 전에 거절하면 503 전송을 시도한 `duration_ms`만 기록합니다.
 
-## 검증
+### 설계 결정 · 현재 한계
 
-커밋 `cd65525`의 GitHub Actions에서 Ubuntu 빌드, 단위 검사, HTTP·프록시 기능 검사, SIGTERM 종료 검사, ASan·UBSan 빌드와 단위 검사가 통과했습니다. 같은 실행의 macOS 러너에서도 빌드와 단위 검사가 통과했습니다. macOS 단위 검사에는 CGI 실행과 검증한 실행 파일이 교체됐을 때의 403 응답이 포함됩니다. [두 플랫폼의 CI 실행 기록](https://github.com/nica7410/SW-AI-W13-WEB-SERVER/actions/runs/45135579500) · [CGI 검사 코드](tests/test_server_edges.c)
+| 항목 | 현재 범위 |
+| :--- | :--- |
+| 프로토콜 | HTTP/1.0·1.1, GET·POST·HEAD; TLS 및 요청 chunked 미지원 |
+| 동시성 | 고정 크기 스레드 풀; 워커 변경은 재시작 필요 |
+| 요청 제한 | URI 2KB, 헤더 줄 8KB, 헤더 32개, 본문 1MB |
+| Forward | HTTP만 지원; CONNECT, DNS 조회 시간 제한, 접속 대상 제한 없음. 신뢰 환경에서만 `-f` 사용 |
+| Reverse | 백엔드 연결 재사용, 1xx 응답, X-Forwarded-For 미지원 |
+| 정적 파일 | 64KB 이하 파일 캐시, TTL 1초로 인해 일시적으로 오래된 내용 반환 가능 |
+| 응답 시간 | 전체 응답 전송 마감 없음. 조금씩 읽는 느린 클라이언트가 워커를 오래 점유할 수 있음 |
 
-`cd65525`를 기준으로 한 33~43번 후속 변경은 Windows의 Linux Docker(`gcc:14`)에서 확인했습니다. 응답 중계와 DNS 마감은 `test_proxy_relay`, 요청 오류 분류와 메서드 기록값은 `test_http_request`, 중복 라우트는 `test_router`, CGI 환경 변수는 `test_server_edges`가 각각 통과했습니다. [항목별 결과와 검증 범위](docs/plans/project-review/cd65525-review-scope.md)
+선택한 모델은 연결당 워커 방식의 스레드 풀입니다. 대규모 장시간 연결을 목표로 한다면 이벤트 기반 구조 등 다른 동시성 모델을 검토해야 합니다.
 
-이전 커밋 `5f211d5`의 Linux Docker에서 워커 1개로 파일 전송 중 클라이언트 연결을 끊었을 때 중단 로그가 남았고 다음 GET은 200과 정상 본문을 받았습니다. 사용 중인 포트에 두 번째 서버를 띄웠을 때 종료 코드는 1, 첫 서버에 SIGINT를 보냈을 때는 0이었습니다. 아래 부하·메모리 측정에는 각 기록의 대상 버전을 표시했습니다.
 
-| 명령 | 확인하는 동작 |
-|---|---|
-| `make test` | HTTP 요청 라인·헤더·크기 상한·헤더/본문 마감(408), MIME 매핑, 절대 URI, 최장 접두사·Round-Robin, 프록시 중계·마감, 파일 경계·CGI·TCP 오류 응답, 스레드 풀 대기 판단 |
-| `bash tests/functional.sh` | 실제 서버 5개에서 정적 파일·MIME, CGI GET/POST, keep-alive·HEAD, 동시 접속, Forward 허용 여부, Reverse 분산·장애 전환·502/504, 워커 1개 서버의 유휴 연결 양보, 큐가 넘칠 때 503 응답 전체 전달 확인 |
-| `make asan` | AddressSanitizer와 UBSan을 적용해 빌드하고 단위 테스트 실행 |
-| `python3 tests/test_shutdown.py` | FD 한도 160·161에서의 기동 결과, CGI 응답 뒤 같은 연결 재사용, 마지막 CGI 응답의 본문과 EOF, SIGTERM 유예와 CGI 프로세스 그룹 정리 확인 |
-| `bash tests/load.sh` | 실행 중인 서버에 동시 접속 수를 바꿔 가며 요청을 보내 처리량·실패·최장 지연 측정 |
+### 전체 검증 · AI 교차 리뷰 · 협업 규칙
 
-기능 테스트는 `make` 후 실행하며 Bash, curl, Python 3과 연속된 빈 포트 6개가 필요합니다. 기본 포트는 18080~18085이고 `PORT=19080 bash tests/functional.sh`처럼 바꿀 수 있습니다.
+- `-Wall -Wextra -Werror` 경고 0, ASan/UBSan 단위 및 기능 테스트 통과, Valgrind 오류/누수 0으로 보고.
+- 변이 63개 중 61개 검출. 원본은 나머지 2개를 등가 변이(`pselect` EINTR 처리, CGI 입력 파이프 종료 시점)로 분류.
+- AI 리뷰 채택: 헤더 값 CR 차단, failover 시작 인덱스 고정, DNS 오류 errno 명시.
+- AI 리뷰 기각: CGI 폴더 심볼릭 링크는 신뢰된 관리자가 배치한다는 설계 전제, Forward 자기 자신 대상 요청은 경로만 재전송하므로 프록시 재귀가 발생하지 않는다는 검증 결과.
+- 팀 협업: 개인 fork 구현, 원본 `dev` PR, 승인 1명 이상 및 Squash and merge, 빌드/테스트/ASan 통과 및 신규 기능 테스트.
 
-sanitizer 서버와 CGI로 기능 테스트를 실행하려면 `SERVER_BIN=./bin/asan/server CGI_DIR=./bin/asan/cgi-bin bash tests/functional.sh`를 사용합니다. 일반 실행 파일은 `bin/server`와 `cgi-bin/adder`에 있습니다.
 
-부하 스크립트는 `ab`를 먼저 선택하고, 설치되어 있지 않으면 `wrk`를 사용합니다. 두 도구 모두 `URL`과 `CONCURRENCY`(공백으로 구분한 동시 연결 수 목록)를 읽습니다.
-
-| 도구 | 동시 연결 수 하나당 측정 조건 |
-|---|---|
-| `ab` | `REQUESTS`건을 보냅니다(기본 5,000건). `KEEPALIVE=1`이면 `-k`로 연결을 재사용합니다. |
-| `wrk` | 스레드 하나로 `DURATION` 동안 실행합니다(기본 3초). 연결 재사용은 도구의 기본 동작을 따르며 이 분기는 `REQUESTS`와 `KEEPALIVE`를 읽지 않습니다. |
-
-`ab` 요약의 `failed`는 연결·읽기·응답 길이 등의 실패 수이고, `non_2xx`는 HTTP 상태가 2xx 범위 밖인 응답 수입니다. 503 응답의 길이까지 달라지면 같은 요청이 두 지표에 모두 포함됩니다. 도구 실행이 실패하거나 필수 지표가 누락되면 스크립트는 오류로 종료합니다.
-
-```bash
-# ab가 설치된 환경
-URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8" REQUESTS=5000 KEEPALIVE=1 bash tests/load.sh
-# wrk만 설치된 환경
-URL=http://127.0.0.1:8080/index.html CONCURRENCY="1 8" DURATION=3s bash tests/load.sh
-```
-
-### 부하 측정 결과 (13~18번 반영 후, 커밋 전 작업 트리)
-
-외부 리뷰어가 `ad86c5f` 위에 13~18번을 반영한 작업 트리를 Docker `gcc:14` 컨테이너에 복사해 측정했습니다. 측정 시점은 연결 거부(`ECONNREFUSED`)를 5초 제외 대상에서 빼기 전입니다.
-
-서버는 기본 설정(`-t 8 -q 1024`)으로 정적 파일 `/index.html`을 제공했습니다. ApacheBench(`ab -q -s 10 -n 5000`)로 동시 연결 수(`-c`)와 연결 재사용 여부(`-k`)를 바꿔 각 조건을 한 번씩 측정했습니다. 표의 단위는 초당 요청 수입니다.
-
-| 동시 연결 수 | 연결 재사용 없음 | keep-alive (`-k`) |
-|---:|---:|---:|
-| 1 | 5,538 | 12,481 |
-| 8 | 12,977 | 39,501 |
-| 9 | — | 10,564 |
-| 32 | 12,980 | 13,010 |
-| 100 | 12,774 | 12,889 |
-
-측정한 9개 조건 모두 `failed=0`, `non_2xx=0`이었습니다. 동시 연결 9개에서는 keep-alive 결과만 보고됐습니다.
-
-<a id="측정-결과-최종-코드"></a>
-
-### 부하 측정 결과 (`3a6b120`)
-
-아래 부하 수치와 메모리 검사 기록은 개선 전 커밋 `3a6b120` 기준입니다. 이후 변경의 검증 결과는 [08번부터 12번까지의 작업 기록](docs/plans/project-review/)에 있습니다.
-
-환경: Windows 10의 Docker Desktop(WSL2) 위 `gcc:14` 컨테이너, 서버 기본 설정(`-t 8 -q 1024`), 클라이언트와 서버가 같은 컨테이너, 대상 `/index.html`(319바이트), 요청 5,000건, 조건마다 1회 측정. 같은 머신에서 클라이언트도 CPU를 나눠 쓰므로 수치의 절대값보다 경향을 보는 용도입니다.
-
-| 동시 연결 수 | 연결 재사용 없음 | 최장 지연 | keep-alive(`-k`) | 최장 지연 |
-|---:|---:|---:|---:|---:|
-| 1 | 5,490건/초 | 1ms | 12,991건/초 | 1ms |
-| 8 | 12,202건/초 | 2ms | 38,253건/초 | 1ms |
-| 9 | — | — | 10,165건/초 | 2ms |
-| 32 | 11,966건/초 | 6ms | 12,068건/초 | 10ms |
-| 64 | 11,944건/초 | 7ms | 11,887건/초 | 8ms |
-| 100 | 12,206건/초 | 10ms | 12,019건/초 | 12ms |
-| 256 | 11,212건/초 | 41ms | 11,730건/초 | 29ms |
-
-모든 조건에서 실패 0건입니다. 워커 수(8)보다 동시 keep-alive 연결이 많으면 서버가 연결을 양보하면서 닫기 때문에 처리량이 연결 재사용 없음 수준으로 내려갑니다. 대신 특정 연결이 유휴 타임아웃(5초)만큼 멈추는 일은 없습니다.
-
-느린 클라이언트와 종료 처리도 같은 환경에서 확인했습니다.
-
-| 시나리오 | 결과 |
-|---|---|
-| 연결 8개가 요청 헤더를 1초에 1바이트씩 보냄 → 9번째 정상 요청 | 4.8초 후 200. 느린 연결은 5초에 408 |
-| 연결 8개가 POST 본문을 4초에 1바이트씩 보냄 → 9번째 정상 요청 | 4.8초 후 200. 느린 연결은 5초에 408 |
-| 유휴 keep-alive 연결이 있는 상태에서 SIGTERM | 30ms 후 종료 코드 0 |
-| 워커 2개 서버의 큐에 요청 없는 연결 40개가 쌓인 상태에서 SIGTERM | 26ms 후 종료 코드 0 (조용한 연결은 처리하지 않고 닫음) |
-| `-q 16`으로 띄운 서버에 `ab -c 200`, `ab -c 1000` (요청 5,000건) | 모두 완료. 넘친 연결은 503 응답을 받음 (각각 2,112건, 497건) |
-| `ulimit -n 256`에서 기본 설정으로 실행 후 `ab -c 300` | 큐를 96으로 줄였다는 경고 출력. 요청 3,000건 모두 완료(503 574건), accept 실패 0건 |
-
-### 후속 외부 부하 측정 (`ad86c5f`)
-
-외부 리뷰어가 Docker `gcc:14` 컨테이너의 저장소 복사본에서 보고한 keep-alive(`-k`) 결과입니다.
-
-| 동시 연결 수 | 처리량 | 비-2xx 응답 수 |
-|---:|---:|---:|
-| 8 | 39,413건/초 | 0 |
-| 100 | 12,962건/초 | 0 |
-
-두 조건에서 관측한 처리량은 이전 표보다 높았습니다. 외부 요약에는 정확한 명령줄, 요청 수, 대상 파일, 워커·큐 설정, 반복 횟수, 최장 지연과 `failed` 값이 기재되지 않았습니다. `non_2xx`는 HTTP 상태를 기준으로 집계합니다.
-
-### 메모리 검사 (`3a6b120`)
-
-- `make -j4 asan`: 단위 테스트 7종이 AddressSanitizer + UBSan 빌드에서 오류 없이 통과했습니다.
-- sanitizer 빌드의 `functional.sh`도 통과했습니다.
-- sanitizer 빌드 서버 두 개(Reverse/Forward 프록시 + 백엔드)에 keep-alive 부하(`ab -k -c 32`), 동시 100 연결 부하, Reverse·CGI POST·Forward·404 요청을 섞어 보낸 뒤 SIGTERM으로 종료했습니다. 두 서버 모두 종료 코드 0, 누수·메모리 오류·정의되지 않은 동작 보고 0건이었습니다.
-
-## 처리 범위와 한계
-
-- HTTP/1.0·1.1에서 GET·POST·HEAD를 처리하며 그 외 메서드에는 501을 반환합니다. URI는 2047바이트까지 허용하고 초과하면 414를 보냅니다. 헤더는 고정 배열에 최대 32개, 한 줄 8KB, 값 버퍼 1KB로 제한하며 상한을 넘기면 431입니다. 본문 상한은 1MB(413)입니다.
-- 핸들러는 성공 시 0, 오류 응답이 필요하면 HTTP 상태 코드, 전송 중 연결을 닫아야 하면 -1을 반환합니다. 워커가 반환값을 보고 오류 응답을 보냅니다.
-- 정적 파일은 GET·HEAD로 제공하고 POST에는 405를 보냅니다. CGI와 프록시는 POST 본문을 바이트 단위로 전달합니다.
-- 정적 응답과 유효한 `Content-Length`를 명시한 CGI 응답은 요청과 워커가 허용하면 연결을 재사용합니다. 길이 0도 포함합니다. CGI가 길이를 생략하거나 `Connection: close`를 출력하면 응답 후 연결을 닫습니다. 본문이 선언한 길이보다 짧거나 중계에 실패해도 연결을 닫습니다. 프록시 응답은 `Connection: close`로 끝납니다.
-- **과부하:** 연결 대기 큐(기본 1024)가 가득 차면 accept 스레드가 503을 보내고 송신만 닫은 뒤, 클라이언트가 닫을 때까지(최대 1초) 입력을 버리다가 close합니다. 이렇게 기다리는 연결이 64개면 accept를 잠시 멈추고 새 연결을 커널 listen backlog에 둡니다.
-- 서버는 기동할 때 **열린 파일 한도(FD 한도)** 중 `워커 수 × 8 + 96`개를 예약합니다. 대기 큐에는 한 칸마다 FD 한 개가 더 필요합니다. soft 한도를 hard 한도 안에서 올려도 요청한 큐가 들어가지 않으면 남은 공간에 맞춰 큐를 줄입니다. 워커 8개에서 적용된 한도가 161이면 큐 한 칸으로 기동하고, 160 이하면 필요한 최소 한도 161을 출력하고 종료합니다.
-- **워커 양보:** 응답을 보낼 때 쉬는 워커가 없고 큐에 기다리는 연결이 있으면 그 응답을 `Connection: close`로 보내고 연결을 넘깁니다. 다음 요청을 기다리는 유휴 연결도 100ms 이상 조용하고 기다리는 연결이 있으면 닫습니다. 두 경우 모두 송신을 먼저 닫고 잠깐 입력을 버려, 클라이언트가 이어 보낸 요청 때문에 RST로 응답을 잃지 않게 합니다. 유휴 연결을 서버가 먼저 닫는 것은 HTTP가 허용하는 동작이지만, 클라이언트가 막 다음 요청을 보낸 순간과 겹치면 그 요청은 응답 없이 끊길 수 있습니다(클라이언트가 재시도해야 함).
-- **시간 제한:** 새 연결의 첫 요청과 keep-alive의 다음 요청은 첫 바이트를 최대 5초 기다립니다. 첫 바이트가 오면 요청 라인부터 헤더 끝까지 5초, 본문 전체에 다시 5초를 적용하고 넘기면 408을 보냅니다. 종료 신호를 받으면 이미 도착한 요청만 처리하고 조용한 연결은 바로 닫습니다. 그래서 느린 클라이언트 하나가 워커를 붙잡는 시간은 최대 약 15초이고, 워커 수만큼 느린 연결이 몰리면 그동안 다른 요청이 기다립니다. 이벤트 루프는 소켓 입력을 기다리는 연결이 워커를 점유하는 문제를 줄입니다. 파일 I/O나 CGI가 루프에서 블로킹되면 다른 연결의 처리는 여전히 지연됩니다.
-- 본문 마감 5초는 1MB 본문 기준 약 200KB/s보다 느린 업로드를 408로 끊습니다.
-- **응답 중계와 종료** · CGI는 실행 시작부터, 두 프록시는 요청 전달 후 응답을 읽기 시작할 때부터 헤더·본문·클라이언트 쓰기에 총 30초를 적용합니다. I/O가 멈추면 5초 후 중단합니다. 진행 중인 큰 중계도 30초를 초과하면 연결이 닫힙니다. SIGINT·SIGTERM으로 수락을 멈추면 진행 중인 작업은 공통 유예 5초 안에 마칠 수 있습니다. 유예가 끝나면 워커가 남은 중계를 중단하고 연결을 닫습니다. 정적 파일은 평상시 전송 시간에 전체 상한이 없습니다.
-- 두 프록시는 DNS 조회부터 최종 응답 헤더까지 5초를 공유합니다. Reverse Proxy는 남은 연결 시간을 설정에 나열된 백엔드 후보 수로 나눕니다. 한 호스트가 여러 IP로 해석되면 두 프록시 모두 해당 호스트의 남은 예산을 아직 시도하지 않은 주소 수로 나누고, 앞선 주소가 빨리 실패하면 남은 시간을 다시 배분합니다. 백엔드가 모두 연결을 거부하면 502, 전체 마감이 지나면 504입니다. 연결 성공 후에는 전체 마감까지 요청을 보내고 응답 헤더를 받습니다. 전송을 시작한 요청은 재시도하지 않습니다.
-- HTTP/1.1 chunked 요청은 조각을 합쳐 CGI에 전달하거나 디코딩한 길이를 Content-Length로 써서 백엔드에 보냅니다. 빈 본문도 길이 0으로 전달합니다. 마지막 조각 뒤의 트레일러는 문법을 검사하고 소비합니다. 각 청크의 크기 줄은 크기 숫자·확장·CRLF를 합쳐 8,192바이트까지이며 초과하면 400입니다. 유효한 줄의 확장은 마지막 0 청크까지 합산해 요청당 8,192바이트를 넘으면 413입니다. 디코딩한 본문은 별도로 1MiB까지 허용하고 전체 본문 수신 마감은 5초입니다. Content-Length와 Transfer-Encoding을 함께 보내면 400입니다.
-- 반복된 `Expect` 필드와 쉼표 목록은 함께 평가합니다. HTTP/1.1에서 받을 본문이 있고 기대값이 모두 `100-continue`이면 100을 한 번 보냅니다. 미지원 값이 하나라도 있거나 목록 전체가 비어 있으면 본문을 읽기 전에 417을 반환합니다.
-- 두 프록시는 HTTP/1.1 클라이언트에 백엔드의 103 Early Hints 등 중간 응답을 최종 응답보다 먼저 전달합니다. 이미 처리한 100 Continue는 생략합니다. 프로토콜 업그레이드(101)와 HTTPS CONNECT는 지원 범위 밖입니다. 원 서버의 chunked 응답은 인코딩을 유지해 중계합니다.
-- Reverse Proxy에 백엔드가 둘 이상이면 연결 시간 초과나 목적지 도달 불가 등의 오류가 난 후보를 5초간 제외합니다. 연결 거부(`ECONNREFUSED`)는 제외 기간을 시작하거나 연장하지 않습니다. 따라서 모두 연결을 거부해 502를 보냈더라도 다음 요청에서 재기동한 백엔드에 바로 연결할 수 있습니다. 남은 후보끼리 라운드로빈을 적용하고 제외 기간이 끝나면 요청 하나가 해당 서버의 복구를 확인합니다. 모든 후보가 제외 또는 복구 확인 중이면 502를 즉시 반환합니다. 실패를 동시에 발견한 요청은 각각 지연될 수 있습니다.
-- 정적 파일과 CGI에서 루트 안을 가리키는 심볼릭 링크를 사용할 수 있습니다. Linux·WSL은 검증한 파일 디스크립터로 CGI를 실행합니다. macOS 경로에서는 요청별 비공개 임시 디렉터리에 하드 링크를 만들고, 열린 파일과 장치·inode가 같은지 확인한 뒤 그 링크로 실행합니다. 그사이 원래 경로가 다른 파일로 바뀌면 403입니다. CGI 실행이 끝나면 링크와 디렉터리를 정리합니다. 하드 링크를 만들 수 있도록 `TMPDIR`(기본 `/tmp`)과 CGI 프로그램은 같은 파일시스템에 두어야 합니다. CGI가 실행 경로를 기준으로 보조 파일을 찾는다면 macOS에서는 임시 링크의 디렉터리가 보일 수 있습니다.
-- CGI에는 메서드, 쿼리, 본문 길이와 타입을 환경 변수로 전달합니다. `SERVER_PROTOCOL`은 요청 버전, `SCRIPT_NAME`은 쿼리를 제외하고 URL 디코딩한 공개 경로입니다. `SERVER_NAME`은 Host에서 포트를 뺀 값이며 Host가 없는 HTTP/1.0 요청에는 로컬 IP를 씁니다. `SERVER_PORT`와 `REMOTE_ADDR`는 TCP 연결의 실제 수신 포트와 상대 IP입니다. POST 본문은 임시 파일을 통해 표준 입력으로 전달하므로 큰 본문과 프로그램 출력이 서로를 막지 않습니다.
-- CGI가 절대 URI의 `Location` 한 개와 빈 줄만 출력하면 서버가 해당 목적지를 담은 `302 Found`와 길이 0의 본문을 보냅니다. 로컬 경로만 제시하는 CGI 내부 리디렉션은 지원 범위 밖입니다.
-- CGI 요청마다 전용 프로세스 그룹을 만듭니다. 중계 오류, 응답 마감 또는 서버 종료 유예 만료로 CGI를 중단하면 같은 그룹에 `SIGKILL`을 보내고, 서버가 직접 실행한 자식은 `waitpid()`로 회수합니다. CGI가 정상적으로 끝난 뒤 백그라운드에 남긴 하위 프로세스는 서버 종료 후에도 실행될 수 있습니다.
-- 실제 정적 디렉터리에 GET·HEAD로 접근하면 끝 슬래시를 붙인 주소를 301로 안내합니다. 예를 들어 `/sub?lang=ko`의 목적지는 `/sub/?lang=ko`이며, 브라우저가 이 주소에서 상대 링크를 해석합니다. 요청 줄바꿈은 CRLF만 받습니다.
+원본: [feat/kimgeonhui-core README](https://github.com/kimgeonhui1/SW-AI-W13-WEB-SERVER/blob/feat/kimgeonhui-core/README.md) (`8e3adb8c` README blob). 발표용 재구성본이며, 수치와 검증 결과는 원본 보고값을 옮겼고 별도 실행으로 재검증하지 않았습니다.
