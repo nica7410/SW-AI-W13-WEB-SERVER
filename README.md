@@ -28,46 +28,82 @@ C와 POSIX 소켓 API만으로 구현한 HTTP 웹서버
 
 ## 01. 전체 구조
 
-> 메인 스레드는 연결 수락만 담당하고, 워커가 HTTP 요청을 처리합니다. 요청 유형에 따라 네 가지 처리 경로를 선택합니다.
+> 서버 시작 시 소켓과 스레드 풀을 먼저 초기화합니다. 이후 메인 스레드는 TCP 연결을 받아 작업 큐에 넣고, 미리 생성된 워커가 연결별 HTTP 요청을 처리합니다.
+
+### 1-1. 서버 시작 (프로세스당 한 번)
 
 ```mermaid
 flowchart TB
-    C(["HTTP Client"]) --> A("Main Thread<br/>pselect · accept")
-    A --> Q("Connection Queue<br/>기본 1,024칸")
-    A -.->|"큐 포화"| BUSY("503 · Close")
-    Q --> W("Thread Pool<br/>기본 8 Workers")
-    W --> R("HTTP Parser<br/>RIO · read_request")
-    R --> D{"dispatch"}
+    A(["main.c · main()"]) --> B("옵션 파싱 및 검증<br/>시그널 핸들러 설정")
+    B --> C("server.c · run_server()<br/>설정 저장 · routes.conf 로드(선택)")
+    C --> D("net.c · open_listenfd()<br/>socket → bind → listen")
+    D --> E("종료 시그널 마스킹<br/>listenfd를 Non-blocking으로 설정")
+    E --> F("threadpool_create()<br/>원형 큐 초기화 · 워커 8개 생성")
+    F --> M("메인 스레드<br/>pselect + accept 루프")
+    F --> W("워커 스레드<br/>빈 큐에서 조건 변수로 대기")
+    classDef entry fill:#E8EFFA,stroke:#6483BD,stroke-width:1px,color:#223B64;
+    classDef core fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
+    class A,B,C,D,E,F,M entry;
+    class W core;
+```
+
+### 1-2. 연결 수락 및 HTTP 요청 처리 (반복)
+
+```mermaid
+flowchart TB
+    C(["HTTP Client"]) --> B("커널 TCP 연결 대기열<br/>listen backlog")
+    B --> A("메인 스레드<br/>pselect → accept")
+    A --> T("connfd 설정<br/>CLOEXEC · Blocking")
+    T --> Q{"threadpool_submit<br/>큐에 공간이 있는가?"}
+    Q -->|"예"| U("사용자 공간 작업 큐<br/>connfd 삽입 · 워커 깨움")
+    Q -->|"아니오"| BUSY("503 응답 · close")
+    U -.->|"메인은 다음 연결 대기"| A
+    BUSY -.->|"다음 연결 대기"| A
+    U --> W("미리 생성된 워커가 connfd 인출<br/>handle_connection()")
+    W --> I("RIO 초기화 · 소켓 타임아웃<br/>TCP_NODELAY")
+    I --> R{"read_request()"}
+    R -->|"0: 정상"| K0("keep 결정<br/>클라이언트 요청 · 종료 여부 · 대기 큐")
+    R -->|"양수: 파싱 오류"| ER("reply_error · 연결 종료")
+    R -->|"음수: EOF · 읽기 실패"| L("lingering_close()")
+    ER --> L
+    K0 --> D{"dispatch()<br/>1 → 2 → 3 → 4 순서로 검사"}
     subgraph HANDLERS["REQUEST HANDLERS"]
         direction LR
-        S("Static File<br/>파일 · 캐시")
-        G("CGI<br/>fork · execve")
-        RP("Reverse Proxy<br/>라우팅 · 분산")
-        FP("Forward Proxy<br/>절대 URI")
+        FP("1. Forward Proxy<br/>절대 URI · -f 필요")
+        RP("2. Reverse Proxy<br/>라우팅 규칙 일치")
+        G("3. CGI<br/>/cgi-bin/")
+        S("4. Static File<br/>그 외 요청")
     end
-    D --> S
-    D --> G
-    D --> RP
     D --> FP
-    S --> H("HTTP Response")
-    G --> H
+    D --> RP
+    D --> G
+    D --> S
     RP --> P("proxy_relay<br/>공통 응답 중계")
-    FP --> P
-    H --> K{"연결 유지?"}
-    P --> K
-    K -->|"Keep-Alive"| R
-    K -->|"종료"| L("lingering_close")
+    FP -->|"허용"| P
+    FP -->|"-f 꺼짐: 403"| J("핸들러 반환값 확인<br/>양수이면 reply_error · 요청 해제")
+    G --> H("콘텐츠 처리 및 응답 시도")
+    S --> H
+    P --> J
+    H --> J
+    J --> K{"keep 유지 · 전송 성공<br/>서버 미종료?"}
+    K -->|"예: 같은 connfd"| R
+    K -->|"아니오"| L
     classDef entry fill:#E8EFFA,stroke:#6483BD,stroke-width:1px,color:#223B64;
     classDef core fill:#E6F4F0,stroke:#4C9385,stroke-width:1px,color:#174C42;
     classDef feature fill:#F1F4F8,stroke:#8C9BAF,stroke-width:1px,color:#34445C;
     classDef proxy fill:#EEEAF8,stroke:#8B79B4,stroke-width:1px,color:#48376E;
     classDef stop fill:#FCEBEC,stroke:#C6747C,stroke-width:1px,color:#842E38;
-    class A,Q,W entry;
-    class R,D,H,K core;
+    class B,A,T,Q,U entry;
+    class W,I,R,K0,D,H,J,K core;
     class S,G feature;
     class RP,FP,P proxy;
-    class BUSY,L stop;
+    class BUSY,ER,L stop;
 ```
+
+- 커널 backlog(`listen`에 전달하는 값 1,024)와 스레드 풀의 원형 큐(기본 1,024칸)는 별개입니다.
+- 메인 스레드는 작업 제출 후 워커의 HTTP 처리 완료를 기다리지 않습니다. 워커는 연결 종료 후 다음 작업을 가져옵니다.
+- 종료 시그널을 받으면 메인 스레드는 리스닝 소켓을 닫고, 스레드 풀을 종료·회수합니다. 워커는 진행 중인 요청을 마치거나 종료 상태에 따라 연결을 정리합니다.
+- 위 그림은 정상 초기화와 주요 처리 경로를 중심으로 표현했습니다. 초기화 실패, 일시적 `accept` 오류 등의 세부 분기는 생략했습니다.
 
 | 연결 관리 | HTTP 처리 | 콘텐츠 처리 | 프록시 처리 |
 | :--- | :--- | :--- | :--- |
